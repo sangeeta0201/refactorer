@@ -11,7 +11,9 @@
 #include <string>
 #include <cstring>
 #include <sstream>
+#include <iostream>
 
+using namespace std;
 using namespace clang;
 using namespace clang::ast_matchers;
 using namespace clang::driver;
@@ -20,6 +22,8 @@ using namespace clang::tooling;
 #define DoubleSize 6
 std::string PositTY = "posit32_t ";
 std::stringstream SSBefore;
+
+SmallVector<unsigned, 8> ProcessedVD;
 
 static llvm::cl::OptionCategory MatcherSampleCategory("Matcher Sample");
 
@@ -53,6 +57,23 @@ int getOffsetUntil(const char *Buf, char Symbol)
 
 class FloatVarDeclHandler : public MatchFinder::MatchCallback {
 public:
+	unsigned getLineNo(SourceLocation StmtStartLoc){
+		SourceManager &SM = Rewrite.getSourceMgr();
+		if (StmtStartLoc.isMacroID()) {
+    	StmtStartLoc = SM.getFileLoc(StmtStartLoc);
+  	}
+  
+  	FileID FID;
+  	unsigned StartOffset = 
+    	getLocationOffsetAndFileID(StmtStartLoc, FID, &SM);
+  
+  	StringRef MB = SM.getBufferData(FID);
+  
+  	unsigned lineNo = SM.getLineNumber(FID, StartOffset) - 1;
+  
+  	return lineNo;
+	}
+
 	std::string getStmtIndentString(SourceLocation StmtStartLoc){
 		SourceManager &SM = Rewrite.getSourceMgr();
 		if (StmtStartLoc.isMacroID()) {
@@ -66,6 +87,7 @@ public:
   	StringRef MB = SM.getBufferData(FID);
   
   	unsigned lineNo = SM.getLineNumber(FID, StartOffset) - 1;
+		llvm::errs()<<"lineNo:"<<lineNo<<"\n";
   	const SrcMgr::ContentCache *
       	Content = SM.getSLocEntry(FID).getFile().getContentCache();
   	unsigned lineOffs = Content->SourceLineCache[lineNo];
@@ -97,6 +119,7 @@ public:
     	StartBuf++;
 			Offset++;
 		}
+		Offset++;
 		
 		char *result = (char *)malloc(Offset+1);
 		
@@ -106,25 +129,25 @@ public:
 	}
 
 	void remove(const VarDecl *VD){
-		bool flag = true;
-  	int Offset = 0;
-		SourceLocation StartLoc =  VD->getLocStart();
-		SourceManager &SM = Rewrite.getSourceMgr();
-		const char *StartBuf = SM.getCharacterData(StartLoc);
-		
-		//is this the last vardecl in stmt? if yes, then remove the statement
-  	while (*StartBuf != ';') {
-    	StartBuf++;
-    	if (*StartBuf == '\0' ){
-				flag = false;
-      	break;
-			}
-			Offset++;
-		}
-		if(flag){
+    int Offset = 0;
+    SourceLocation StartLoc =  VD->getLocStart();
+    SourceManager &SM = Rewrite.getSourceMgr();
+    const char *StartBuf = SM.getCharacterData(StartLoc);
+  
+		SourceLocation StartLoc1 = VD->getSourceRange().getBegin();
+		unsigned lineNo = getLineNo(StartLoc1);
+    //is this the last vardecl in stmt? if yes, then remove the statement
+    while (*StartBuf != ';') {
+      StartBuf++;
+      Offset++;
+    }
+		SmallVector<unsigned, 8>::iterator it;
+		it = std::find(ProcessedVD.begin(), ProcessedVD.end(), lineNo);		
+		if(it == ProcessedVD.end()){
 			Rewriter::RewriteOptions Opts;
 			Opts.RemoveLineIfEmpty = true;
-			Rewrite.RemoveText(SourceRange(VD->getLocStart(), VD->getLocStart().getLocWithOffset(Offset)), Opts); 
+			Rewrite.RemoveText(SourceRange(VD->getLocStart().getLocWithOffset(-1), VD->getLocStart().getLocWithOffset(Offset)), Opts); 
+			ProcessedVD.push_back(lineNo);
 		}
 	}
 
@@ -148,6 +171,15 @@ public:
 			SSBefore <<string[i];
 		std::string convert = " = convertDoubleToP32(" + SSBefore.str()+");";
 		return convert ;
+	}
+
+	void ReplaceParmVDWithPosit(const VarDecl *VD, char positLiteral){
+		SourceLocation StartLoc =  VD->getLocStart();
+		SourceManager &SM = Rewrite.getSourceMgr();
+		const char *StartBuf = SM.getCharacterData(StartLoc);
+		int Offset = getOffsetUntil(StartBuf, positLiteral);
+		Rewrite.ReplaceText(SourceRange(VD->getLocStart(), VD->getLocStart().getLocWithOffset(Offset-1)), 
+													PositTY);	
 	}
 
 	void ReplaceVDWithPosit(const VarDecl *VD, std::string positLiteral){
@@ -182,13 +214,13 @@ public:
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
 			llvm::errs()<<"no literal\n";
-			VD->dump();
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
   		if (PD) {
-				llvm::errs()<<"paramval\n";
+				ReplaceParmVDWithPosit(VD, ' ');
   		}
-
-			ReplaceVDWithPosit(VD, ";");
+			else{
+				ReplaceVDWithPosit(VD, ";");
+			}
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclarray")){
 			llvm::errs()<<"array\n";
@@ -216,7 +248,16 @@ public:
 			}
 			if(!Ty->isFloatingType())
 				return;
-			ReplaceVDWithPosit(VD, ";");
+			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
+  		if (PD) {
+				llvm::errs()<<"paramval\n";
+				//for function parameter end string will be either ',' or ')'
+				//we want to replace double with posit, instead of creating a new variable
+				ReplaceParmVDWithPosit(VD, '*');
+  		}
+			else{
+				ReplaceVDWithPosit(VD, ";");
+			}
 		}
   }
 
@@ -230,14 +271,15 @@ private:
 class MyASTConsumer : public ASTConsumer {
 public:
   MyASTConsumer(Rewriter &R) :  HandlerFloatVarDecl(R){
-		//matcher for  double x = 3.4, y = 5.6;
 
+		//matcher for  double x = 3.4, y = 5.6;
 		Matcher.addMatcher(
 				varDecl(hasType(realFloatingPointType()), anyOf(hasInitializer(ignoringParenImpCasts(
 					integerLiteral().bind("intliteral"))), hasInitializer(ignoringParenImpCasts(
           floatLiteral().bind("floatliteral")))))
 						.bind("vd_literal"), &HandlerFloatVarDecl);
 
+		//matcher for  double x, y;
 		Matcher.addMatcher(
 			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
 				unless( hasInitializer(ignoringParenImpCasts(integerLiteral())))).
@@ -251,20 +293,15 @@ public:
 		Matcher.addMatcher(
 			typedefDecl().
 					bind("vardeclstruct"), &HandlerFloatVarDecl);
-
 		Matcher.addMatcher(
 			varDecl(hasType(arrayType()), unless(	hasInitializer(initListExpr()	))).
 					bind("vardeclarray"), &HandlerFloatVarDecl);
-/*
 		//function parameters
 		Matcher.addMatcher(
 			cxxMethodDecl(hasAnyParameter(hasType(realFloatingPointType()))).
 				bind("vardeclnoinit"), &HandlerFloatVarDecl);
 		//matches floating type array with no initializer
-		Matcher.addMatcher(
-			varDecl(hasType(arrayType()), unless(	hasInitializer(initListExpr()	))).
-					bind("vardeclarray"), &HandlerFloatVarDecl);
-*/
+
 //TODO: How to generalize any array with builting type as floaitng point
 	//typedef
 	//struct type
