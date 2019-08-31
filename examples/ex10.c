@@ -5,7 +5,6 @@
 #define SIZE_Y 10
 #define SIZE_X 10
 typedef double LBM_Grid[SIZE_Z*SIZE_Y*SIZE_X*N_CELL_ENTRIES];
-//int foo(LBM_Grid grid, char t){
 int foo( double** ptr, double xx ){
 	int n = 10;
 	int m = 10;
@@ -22,11 +21,4 @@ int foo( double** ptr, double xx ){
 	double z = 0;
 	double min;
 	double minU2  = 1e+30, maxU2  = 1e+30, u2;
-	//double minU2  = 1e+30, maxU2  = -1e+30, u2;
-	if( minU2 > maxU2 )min=maxU2;   
-//	for (i = 0; i < m; i++){
- //   for (j = 0; j < n; j++) {
-//			px = (((i / N_CELL_ENTRIES) % (1*(100))) / (0.5*((1*(100))-1))) - 1.0;
-//		}
-//	}
 }
