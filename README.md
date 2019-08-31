@@ -3,7 +3,7 @@
 To build set path for llvm and clang in Makefile and run make in top directory.
 
 To run:
-  ./build/refactor_f_to_pos examples/ex1.c
+  ./build/refactor_posit examples/ex10.c
  
-It will save ex1_pos in same directory.
+It will save ex10_pos in same directory.
 # refactorer
