@@ -22,7 +22,10 @@ using namespace clang::tooling;
 #define DoubleSize 6
 std::string PositTY = "posit32_t ";
 std::stringstream SSBefore;
+//track temp variables
+unsigned tmpCount = 0;
 
+std::map<const BinaryOperator*, std::string> BinOp_Temp; 
 SmallVector<unsigned, 8> ProcessedVD;
 
 static llvm::cl::OptionCategory MatcherSampleCategory("Matcher Sample");
@@ -37,7 +40,8 @@ unsigned getLocationOffsetAndFileID(SourceLocation Loc,
   return V.second;
 }
 
-
+///TODO:
+/*
 int getOffsetUntil(const char *Buf, char Symbol)
 {
   int Offset = 0;
@@ -49,12 +53,20 @@ int getOffsetUntil(const char *Buf, char Symbol)
     	Offset++;
       break;
 		}
-
     Offset++;
   }
   return Offset;
 }
-
+*/
+int getOffsetUntil(const char *Buf, char Symbol)
+{
+  int Offset = 0;
+  while (*Buf != Symbol) {
+    Buf++;
+    Offset++;
+  }
+  return Offset;
+}
 class FloatVarDeclHandler : public MatchFinder::MatchCallback {
 public:
 	unsigned getLineNo(SourceLocation StmtStartLoc){
@@ -87,7 +99,6 @@ public:
   	StringRef MB = SM.getBufferData(FID);
   
   	unsigned lineNo = SM.getLineNumber(FID, StartOffset) - 1;
-		llvm::errs()<<"lineNo:"<<lineNo<<"\n";
   	const SrcMgr::ContentCache *
       	Content = SM.getSLocEntry(FID).getFile().getContentCache();
   	unsigned lineOffs = Content->SourceLineCache[lineNo];
@@ -128,15 +139,12 @@ public:
 		return result;
 	}
 
-	void remove(const VarDecl *VD){
+	void removeLine(SourceLocation StartLoc){
     int Offset = 0;
-    SourceLocation StartLoc =  VD->getLocStart();
     SourceManager &SM = Rewrite.getSourceMgr();
     const char *StartBuf = SM.getCharacterData(StartLoc);
-  
-		SourceLocation StartLoc1 = VD->getSourceRange().getBegin();
-		unsigned lineNo = getLineNo(StartLoc1);
-    //is this the last vardecl in stmt? if yes, then remove the statement
+		unsigned lineNo = getLineNo(StartLoc);
+    //is this the last vardecl in stmt? if yes, then removeLine the statement
     while (*StartBuf != ';') {
       StartBuf++;
       Offset++;
@@ -146,7 +154,9 @@ public:
 		if(it == ProcessedVD.end()){
 			Rewriter::RewriteOptions Opts;
 			Opts.RemoveLineIfEmpty = true;
-			Rewrite.RemoveText(SourceRange(VD->getLocStart().getLocWithOffset(-1), VD->getLocStart().getLocWithOffset(Offset)), Opts); 
+    	const char *StartBuf1 = SM.getCharacterData(StartLoc.getLocWithOffset(-1));
+			llvm::errs()<<"removeLine StartBuf:"<<StartBuf1<<"\n";
+			Rewrite.RemoveText(SourceRange(StartLoc.getLocWithOffset(-1), StartLoc.getLocWithOffset(Offset)), Opts); 
 			ProcessedVD.push_back(lineNo);
 		}
 	}
@@ -169,8 +179,38 @@ public:
 		std::stringstream SSBefore;
 		for(int i = 0;i<string.size();i++)
 			SSBefore <<string[i];
-		std::string convert = " = convertDoubleToP32(" + SSBefore.str()+");";
+		std::string convert = " convertDoubleToP32(" + SSBefore.str()+");";
 		return convert ;
+	}
+
+	std::string getTempDest(){
+		tmpCount++;
+		return "tmp"+std::to_string(tmpCount);
+	}
+
+	std::string getPositFuncName(unsigned Opcode){
+		string funcName;
+		llvm::errs()<<"getPositFuncName Opcode:"<<Opcode<<"\n";
+		switch(Opcode){
+			case 2:
+				funcName = "p32_mul";
+				break;
+			case 3:
+				funcName = "p32_div";
+				break;
+			case 5:
+				funcName = "p32_add";
+				break;
+			case 6:
+				funcName = "p32_sub";
+				break;
+			case 21:
+				funcName = "p32_sub";
+				break;
+			default:
+				assert("This opcode is not handled!!!");
+		}
+		return funcName;
 	}
 
 	void ReplaceParmVDWithPosit(const VarDecl *VD, char positLiteral){
@@ -183,23 +223,74 @@ public:
 	}
 
 	void ReplaceVDWithPosit(const VarDecl *VD, std::string positLiteral){
+		llvm::errs()<<"ReplaceVDWithPosit:\n";
 		SourceLocation StartLoc =  VD->getLocStart();
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *StartBuf = SM.getCharacterData(StartLoc);
+		llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
 		int Offset = getOffsetUntil(StartBuf, ';');
 		SourceLocation StartLoc1 = VD->getSourceRange().getBegin();
 		std::string IndentStr = getStmtIndentString(StartLoc1);
 		Rewrite.InsertTextAfterToken(VD->getLocStart().getLocWithOffset(Offset), 
 					"\n"+IndentStr+PositTY+VD->getNameAsString()+ positLiteral);
 		
-		remove(VD);
+		removeLine(VD->getLocStart());
+	}
+
+	void ReplaceBOLiteralWithPosit(const BinaryOperator *BO, std::string lhs, std::string rhs){
+		SourceLocation StartLoc =  BO->getLocStart();
+		SourceManager &SM = Rewrite.getSourceMgr();
+		const char *StartBuf = SM.getCharacterData(StartLoc);
+		llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
+		int Offset = getOffsetUntil(StartBuf, ';');
+		SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
+		std::string IndentStr = getStmtIndentString(StartLoc1);
+		llvm::errs()<<"Offset:"<<Offset<<"\n";
+		Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+					"\n"+IndentStr+PositTY+lhs+"=" +rhs);		
+	}
+
+	void ReplaceBOEqWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
+			llvm::errs()<<"ReplaceBOEqWithPosit\n";
+			BO->dump();	
+			std::string func = getPositFuncName(BO->getOpcode());
+			SourceLocation StartLoc =  BO->getLocStart();
+			SourceManager &SM = Rewrite.getSourceMgr();
+			const char *StartBuf = SM.getCharacterData(StartLoc);
+			int Offset = getOffsetUntil(StartBuf, ';');
+			SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
+			std::string IndentStr = getStmtIndentString(StartLoc1);
+	
+			Rewrite.InsertTextAfter(BO->getLocStart().getLocWithOffset(Offset), 
+					"\n"+IndentStr+PositTY+Op1+" = "+Op2+";\n");
+			BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
+			removeLine(BO->getLocStart());
+	}
+
+	void ReplaceBOWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
+		
+			std::string func = getPositFuncName(BO->getOpcode());
+			SourceLocation StartLoc =  BO->getLocStart();
+			SourceManager &SM = Rewrite.getSourceMgr();
+			const char *StartBuf = SM.getCharacterData(StartLoc);
+			llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
+			int Offset = getOffsetUntil(StartBuf, ';');
+			SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
+			std::string IndentStr = getStmtIndentString(StartLoc1);
+			const char *StartBuf1 = SM.getCharacterData(BO->getLocStart().getLocWithOffset(Offset));
+			llvm::errs()<<"StartBuf1:"<<StartBuf1<<"\n";
+			std::string temp, newline;
+			temp = getTempDest();
+			newline = "\0";
+			Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+					"\n"+IndentStr+PositTY+" "+temp+" = "+func+"("+Op1+","+Op2+");"+newline);
+			BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, temp));	
 	}
 
   FloatVarDeclHandler(Rewriter &Rewrite) : Rewrite(Rewrite) {}
 
   virtual void run(const MatchFinder::MatchResult &Result) {
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal")){
-			llvm::errs()<<"literal\n";
 			VD->dump();
 			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
 			if(FL != NULL){
@@ -213,7 +304,6 @@ public:
 			}
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
-			llvm::errs()<<"no literal\n";
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
   		if (PD) {
 				ReplaceParmVDWithPosit(VD, ' ');
@@ -223,7 +313,6 @@ public:
 			}
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclarray")){
-			llvm::errs()<<"array\n";
 			VD->dump();
 			const Type *Ty = VD->getType().getTypePtr();
 			while (Ty->isArrayType()) {                                                             
@@ -238,7 +327,6 @@ public:
 			ReplaceVDWithPosit(VD, arrayDim);
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclpointer")){
-			llvm::errs()<<"pointer\n";
 			VD->dump();
 			const Type *Ty = VD->getType().getTypePtr();
 			QualType QT = Ty->getPointeeType();
@@ -250,13 +338,85 @@ public:
 				return;
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
   		if (PD) {
-				llvm::errs()<<"paramval\n";
 				//for function parameter end string will be either ',' or ')'
 				//we want to replace double with posit, instead of creating a new variable
 				ReplaceParmVDWithPosit(VD, '*');
   		}
 			else{
 				ReplaceVDWithPosit(VD, ";");
+			}
+		}
+		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo")){
+			const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("op");
+			std::string Op1 = BinOp_Temp.at(BO);
+			ReplaceVDWithPosit(VD, " = "+Op1+";");
+		}
+		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_ee")){
+
+			//check if this binaryoperator is processed
+			//check if LHS is processed, get its temp variable
+			//check if RHS is processed, get its temp variable
+			//create new varible, if this BO doesnt have a VD as its LHS
+			//push this in map
+			const DeclRefExpr *DEL = Result.Nodes.getNodeAs<clang::DeclRefExpr>("lhs_ee");
+			const DeclRefExpr *DER = Result.Nodes.getNodeAs<clang::DeclRefExpr>("rhs_ee");
+			const FloatingLiteral *FL_lhs = Result.Nodes.getNodeAs<clang::FloatingLiteral>("lhs_literal");
+			const FloatingLiteral *FL_rhs = Result.Nodes.getNodeAs<clang::FloatingLiteral>("rhs_literal");
+			const BinaryOperator *BO_lhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("lhs_bo");
+			const BinaryOperator *BO_rhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("rhs_bo");
+
+			BO->dump();
+			std::string Op1, Op2, lhs, rhs;
+			llvm::errs()<<"BO_lhs:\n";
+			BO_lhs->dump();
+			llvm::errs()<<"BO_rhs:\n";
+			BO_rhs->dump();
+			if(FL_lhs){
+				lhs = getTempDest();
+				rhs  = convertFloatToPosit(FL_lhs);
+				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
+				Op1 = lhs;
+				llvm::errs()<<"FL_lhs Op1:"<<Op1<<"\n";
+			}
+			else if(BO_lhs){
+				Op1 = BinOp_Temp.at(BO_lhs);
+				llvm::errs()<<"BO_lhs Op1:"<<Op1<<"\n";
+			}
+			else if(DEL){
+				Op1 = DEL->getDecl()->getName();
+				llvm::errs()<<"DEL Op1:"<<Op1<<"\n";
+			}
+			else
+				assert("fadd_ee: operand not handled!!!");
+
+			if(FL_rhs){
+				lhs = getTempDest();
+				rhs  = convertFloatToPosit(FL_rhs);
+				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
+				Op2 = lhs;
+				llvm::errs()<<"FL_lhs Op2:"<<Op2<<"\n";
+			}
+			else if(BO_rhs){
+				Op2 = BinOp_Temp.at(BO_rhs);
+				llvm::errs()<<"BO_lhs Op2:"<<Op2<<"\n";
+			}
+			else if(DER){
+				Op2 = DER->getDecl()->getName();
+				llvm::errs()<<"DER Op2:"<<Op2<<"\n";
+			}
+			else{
+				llvm::errs()<<"error\n";
+				assert("fadd_ee: operand not handled!!!");
+			}
+
+			llvm::errs()<<"BO->getOpcode():"<<BO->getOpcode()<<"\n";
+			if (BO->getOpcode() == BO_Assign){
+				llvm::errs()<<"Op1:"<<Op1<<"\n";
+				llvm::errs()<<"Op2:"<<Op2<<"\n";
+				ReplaceBOEqWithPosit(BO, Op1, Op2);
+			}
+			else{
+				ReplaceBOWithPosit(BO, Op1, Op2);
 			}
 		}
   }
@@ -278,12 +438,13 @@ public:
 					integerLiteral().bind("intliteral"))), hasInitializer(ignoringParenImpCasts(
           floatLiteral().bind("floatliteral")))))
 						.bind("vd_literal"), &HandlerFloatVarDecl);
-
 		//matcher for  double x, y;
+		//ignores double x = x + y;
 		Matcher.addMatcher(
 			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
-				unless( hasInitializer(ignoringParenImpCasts(integerLiteral())))).
+				unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), unless(hasDescendant(binaryOperator()))).
 					bind("vardeclnoinit"), &HandlerFloatVarDecl);
+
 
 		//pointer
 		Matcher.addMatcher(
@@ -300,7 +461,44 @@ public:
 		Matcher.addMatcher(
 			cxxMethodDecl(hasAnyParameter(hasType(realFloatingPointType()))).
 				bind("vardeclnoinit"), &HandlerFloatVarDecl);
-		//matches floating type array with no initializer
+
+		//all binary operators, except '=' and binary operators which have operand as binary operator
+		Matcher.addMatcher(
+			binaryOperator(unless(hasOperatorName("=")),
+  				hasLHS(anyOf(ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("lhs_ee")), 
+						ignoringParenImpCasts(floatLiteral().bind("lhs_literal")))),
+  						hasRHS(anyOf(ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
+											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
+
+		Matcher1.addMatcher(
+			binaryOperator(unless(hasOperatorName("=")),
+  				hasLHS(binaryOperator(                                                                                   
+            hasType(realFloatingPointType())).bind("lhs_bo")),
+  						hasRHS(binaryOperator(hasType(realFloatingPointType())).bind("rhs_bo"))).bind("fadd_ee"), &HandlerFloatVarDecl);
+
+		//all binary operators
+		//should be executed after above matcher
+		Matcher2.addMatcher(
+			binaryOperator(hasOperatorName("="),
+  				hasLHS(anyOf(binaryOperator(
+						hasType(realFloatingPointType())).bind("lhs_bo"),ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("lhs_ee")), 
+						ignoringParenImpCasts(floatLiteral().bind("lhs_literal")))),
+  						hasRHS(anyOf(binaryOperator(hasType(realFloatingPointType())).bind("rhs_bo"), 
+									ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
+											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
+
+		//double t = 0.5 + x + z * y ;   
+		Matcher3.addMatcher(
+			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
+				unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), hasDescendant(binaryOperator().bind("op"))).
+					bind("vardeclbo"), &HandlerFloatVarDecl);
+		//binary operator which has lhs as binaryoperator and rhs as expr
+
+
 
 //TODO: How to generalize any array with builting type as floaitng point
 	//typedef
@@ -313,6 +511,9 @@ public:
   void HandleTranslationUnit(ASTContext &Context) override {
     // Run the matchers when we have the whole TU parsed.
     Matcher.matchAST(Context);
+    Matcher1.matchAST(Context);
+    Matcher2.matchAST(Context);
+    Matcher3.matchAST(Context);
   }
 
 	bool HandleTopLevelDecl(DeclGroupRef DR) override {
@@ -325,6 +526,9 @@ public:
 private:
   FloatVarDeclHandler HandlerFloatVarDecl;
   MatchFinder Matcher;
+  MatchFinder Matcher1;
+  MatchFinder Matcher2;
+  MatchFinder Matcher3;
 };
 
 // For each source file provided to the tool, a new FrontendAction is created.
