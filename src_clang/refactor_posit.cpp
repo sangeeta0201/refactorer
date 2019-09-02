@@ -27,6 +27,7 @@ unsigned tmpCount = 0;
 
 std::map<const BinaryOperator*, std::string> BinOp_Temp; 
 SmallVector<unsigned, 8> ProcessedVD;
+SmallVector<const BinaryOperator*, 8> ProcessedBO;
 
 static llvm::cl::OptionCategory MatcherSampleCategory("Matcher Sample");
 
@@ -67,6 +68,7 @@ int getOffsetUntil(const char *Buf, char Symbol)
   }
   return Offset;
 }
+
 class FloatVarDeclHandler : public MatchFinder::MatchCallback {
 public:
 	unsigned getLineNo(SourceLocation StmtStartLoc){
@@ -97,7 +99,6 @@ public:
     	getLocationOffsetAndFileID(StmtStartLoc, FID, &SM);
   
   	StringRef MB = SM.getBufferData(FID);
-  
   	unsigned lineNo = SM.getLineNumber(FID, StartOffset) - 1;
   	const SrcMgr::ContentCache *
       	Content = SM.getSLocEntry(FID).getFile().getContentCache();
@@ -141,8 +142,10 @@ public:
 
 	void removeLine(SourceLocation StartLoc){
     int Offset = 0;
+    int StartOffset = 0;
     SourceManager &SM = Rewrite.getSourceMgr();
     const char *StartBuf = SM.getCharacterData(StartLoc);
+		llvm::errs()<<"removeLine StartBuf:"<<StartBuf<<"\n";
 		unsigned lineNo = getLineNo(StartLoc);
     //is this the last vardecl in stmt? if yes, then removeLine the statement
     while (*StartBuf != ';') {
@@ -154,13 +157,16 @@ public:
 		if(it == ProcessedVD.end()){
 			Rewriter::RewriteOptions Opts;
 			Opts.RemoveLineIfEmpty = true;
-    	const char *StartBuf1 = SM.getCharacterData(StartLoc.getLocWithOffset(-1));
-			llvm::errs()<<"removeLine StartBuf:"<<StartBuf1<<"\n";
-			Rewrite.RemoveText(SourceRange(StartLoc.getLocWithOffset(-1), StartLoc.getLocWithOffset(Offset)), Opts); 
+    	const char *StartBuf1 = SM.getCharacterData(StartLoc.getLocWithOffset(StartOffset));
+		llvm::errs()<<"removeLine StartBuf1:"<<StartBuf1<<"\n";
+//			llvm::raw_string_ostream stream(StartLoc);
+			//StartLoc.print(stream, SM);
+			Rewrite.RemoveText(StartLoc.getLocWithOffset(-2), Offset+3, Opts); 
 			ProcessedVD.push_back(lineNo);
 		}
 	}
 
+	//returns conversion function for int type to posit
 	std::string convertIntToPosit(const IntegerLiteral *IL){
 		llvm::APInt intval = IL->getValue();
 		llvm::SmallVector<char, 32> string;
@@ -172,6 +178,7 @@ public:
 		return convert ;
 	}
 
+	//returns conversion function for floating type to posit
 	std::string convertFloatToPosit(const FloatingLiteral *FL){
 		llvm::APFloat floatval = FL->getValue();
 		llvm::SmallVector<char, 32> string;
@@ -179,10 +186,11 @@ public:
 		std::stringstream SSBefore;
 		for(int i = 0;i<string.size();i++)
 			SSBefore <<string[i];
-		std::string convert = " convertDoubleToP32(" + SSBefore.str()+");";
+		std::string convert = " = convertDoubleToP32(" + SSBefore.str()+");";
 		return convert ;
 	}
 
+	//This function returns temp variables
 	std::string getTempDest(){
 		tmpCount++;
 		return "tmp"+std::to_string(tmpCount);
@@ -190,7 +198,6 @@ public:
 
 	std::string getPositFuncName(unsigned Opcode){
 		string funcName;
-		llvm::errs()<<"getPositFuncName Opcode:"<<Opcode<<"\n";
 		switch(Opcode){
 			case 2:
 				funcName = "p32_mul";
@@ -213,6 +220,7 @@ public:
 		return funcName;
 	}
 
+	//func(double x) => func(posit32_t x)
 	void ReplaceParmVDWithPosit(const VarDecl *VD, char positLiteral){
 		SourceLocation StartLoc =  VD->getLocStart();
 		SourceManager &SM = Rewrite.getSourceMgr();
@@ -222,68 +230,65 @@ public:
 													PositTY);	
 	}
 
+	//double x => posit32_t x
 	void ReplaceVDWithPosit(const VarDecl *VD, std::string positLiteral){
-		llvm::errs()<<"ReplaceVDWithPosit:\n";
 		SourceLocation StartLoc =  VD->getLocStart();
 		SourceManager &SM = Rewrite.getSourceMgr();
+		Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
 		const char *StartBuf = SM.getCharacterData(StartLoc);
-		llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
 		int Offset = getOffsetUntil(StartBuf, ';');
 		SourceLocation StartLoc1 = VD->getSourceRange().getBegin();
 		std::string IndentStr = getStmtIndentString(StartLoc1);
 		Rewrite.InsertTextAfterToken(VD->getLocStart().getLocWithOffset(Offset), 
 					"\n"+IndentStr+PositTY+VD->getNameAsString()+ positLiteral);
-		
-		removeLine(VD->getLocStart());
+	
+		removeLine(VD->getSourceRange().getBegin());
 	}
-
+//	x = y * 0.3 => t1 = convertdoubletoposit(0.3)
 	void ReplaceBOLiteralWithPosit(const BinaryOperator *BO, std::string lhs, std::string rhs){
 		SourceLocation StartLoc =  BO->getLocStart();
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *StartBuf = SM.getCharacterData(StartLoc);
-		llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
 		int Offset = getOffsetUntil(StartBuf, ';');
 		SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
 		std::string IndentStr = getStmtIndentString(StartLoc1);
-		llvm::errs()<<"Offset:"<<Offset<<"\n";
 		Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
-					"\n"+IndentStr+PositTY+lhs+"=" +rhs);		
+					"\n"+IndentStr+PositTY+lhs +rhs);		
 	}
 
+	//x = y * 0.3 => x = posit_mul(y, t1);
+	//removes the line
 	void ReplaceBOEqWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
-			llvm::errs()<<"ReplaceBOEqWithPosit\n";
-			BO->dump();	
-			std::string func = getPositFuncName(BO->getOpcode());
-			SourceLocation StartLoc =  BO->getLocStart();
-			SourceManager &SM = Rewrite.getSourceMgr();
-			const char *StartBuf = SM.getCharacterData(StartLoc);
-			int Offset = getOffsetUntil(StartBuf, ';');
-			SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
-			std::string IndentStr = getStmtIndentString(StartLoc1);
+		SourceLocation StartLoc =  BO->getLocStart();
+		SourceManager &SM = Rewrite.getSourceMgr();
+		const char *StartBuf = SM.getCharacterData(StartLoc);
+		int Offset = getOffsetUntil(StartBuf, ';');
+		SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
+		std::string IndentStr = getStmtIndentString(StartLoc1);
 	
-			Rewrite.InsertTextAfter(BO->getLocStart().getLocWithOffset(Offset), 
-					"\n"+IndentStr+PositTY+Op1+" = "+Op2+";\n");
-			BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
-			removeLine(BO->getLocStart());
+		Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+					"\n"+IndentStr+Op1+" = "+Op2+";\n");
+		BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
+		removeLine(BO->getLocStart());
 	}
 
+	//handle all binary operators except assign
+	// x = *0.4*y*z => t1 = posit_mul(y,z);
 	void ReplaceBOWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
 		
 			std::string func = getPositFuncName(BO->getOpcode());
 			SourceLocation StartLoc =  BO->getLocStart();
 			SourceManager &SM = Rewrite.getSourceMgr();
 			const char *StartBuf = SM.getCharacterData(StartLoc);
-			llvm::errs()<<"StartBuf:"<<StartBuf<<"\n";
 			int Offset = getOffsetUntil(StartBuf, ';');
 			SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
 			std::string IndentStr = getStmtIndentString(StartLoc1);
 			const char *StartBuf1 = SM.getCharacterData(BO->getLocStart().getLocWithOffset(Offset));
-			llvm::errs()<<"StartBuf1:"<<StartBuf1<<"\n";
 			std::string temp, newline;
 			temp = getTempDest();
 			newline = "\0";
 			Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
-					"\n"+IndentStr+PositTY+" "+temp+" = "+func+"("+Op1+","+Op2+");"+newline);
+					"\n"+IndentStr+PositTY+temp+" = "+func+"("+Op1+","+Op2+");");
 			BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, temp));	
 	}
 
@@ -291,7 +296,6 @@ public:
 
   virtual void run(const MatchFinder::MatchResult &Result) {
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal")){
-			VD->dump();
 			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
 			if(FL != NULL){
 				std::string positLiteral = convertFloatToPosit(FL);
@@ -313,13 +317,11 @@ public:
 			}
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclarray")){
-			VD->dump();
 			const Type *Ty = VD->getType().getTypePtr();
 			while (Ty->isArrayType()) {                                                             
     		const ArrayType *AT = dyn_cast<ArrayType>(Ty);
     		Ty = AT->getElementType().getTypePtr();
   		}
-			Ty->dump();
 			if(!Ty->isFloatingType())
 				return;
 
@@ -327,7 +329,6 @@ public:
 			ReplaceVDWithPosit(VD, arrayDim);
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclpointer")){
-			VD->dump();
 			const Type *Ty = VD->getType().getTypePtr();
 			QualType QT = Ty->getPointeeType();
 			while (!QT.isNull()) {
@@ -352,12 +353,19 @@ public:
 			ReplaceVDWithPosit(VD, " = "+Op1+";");
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_ee")){
-
+			
 			//check if this binaryoperator is processed
 			//check if LHS is processed, get its temp variable
 			//check if RHS is processed, get its temp variable
 			//create new varible, if this BO doesnt have a VD as its LHS
 			//push this in map
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+
+			ProcessedBO.push_back(BO);
+
 			const DeclRefExpr *DEL = Result.Nodes.getNodeAs<clang::DeclRefExpr>("lhs_ee");
 			const DeclRefExpr *DER = Result.Nodes.getNodeAs<clang::DeclRefExpr>("rhs_ee");
 			const FloatingLiteral *FL_lhs = Result.Nodes.getNodeAs<clang::FloatingLiteral>("lhs_literal");
@@ -365,26 +373,18 @@ public:
 			const BinaryOperator *BO_lhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("lhs_bo");
 			const BinaryOperator *BO_rhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("rhs_bo");
 
-			BO->dump();
 			std::string Op1, Op2, lhs, rhs;
-			llvm::errs()<<"BO_lhs:\n";
-			BO_lhs->dump();
-			llvm::errs()<<"BO_rhs:\n";
-			BO_rhs->dump();
 			if(FL_lhs){
 				lhs = getTempDest();
 				rhs  = convertFloatToPosit(FL_lhs);
 				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
 				Op1 = lhs;
-				llvm::errs()<<"FL_lhs Op1:"<<Op1<<"\n";
 			}
 			else if(BO_lhs){
 				Op1 = BinOp_Temp.at(BO_lhs);
-				llvm::errs()<<"BO_lhs Op1:"<<Op1<<"\n";
 			}
 			else if(DEL){
 				Op1 = DEL->getDecl()->getName();
-				llvm::errs()<<"DEL Op1:"<<Op1<<"\n";
 			}
 			else
 				assert("fadd_ee: operand not handled!!!");
@@ -394,22 +394,17 @@ public:
 				rhs  = convertFloatToPosit(FL_rhs);
 				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
 				Op2 = lhs;
-				llvm::errs()<<"FL_lhs Op2:"<<Op2<<"\n";
 			}
 			else if(BO_rhs){
 				Op2 = BinOp_Temp.at(BO_rhs);
-				llvm::errs()<<"BO_lhs Op2:"<<Op2<<"\n";
 			}
 			else if(DER){
 				Op2 = DER->getDecl()->getName();
-				llvm::errs()<<"DER Op2:"<<Op2<<"\n";
 			}
 			else{
 				llvm::errs()<<"error\n";
-				assert("fadd_ee: operand not handled!!!");
 			}
 
-			llvm::errs()<<"BO->getOpcode():"<<BO->getOpcode()<<"\n";
 			if (BO->getOpcode() == BO_Assign){
 				llvm::errs()<<"Op1:"<<Op1<<"\n";
 				llvm::errs()<<"Op2:"<<Op2<<"\n";
@@ -472,12 +467,17 @@ public:
                     to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
 											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
 
+
 		Matcher1.addMatcher(
 			binaryOperator(unless(hasOperatorName("=")),
-  				hasLHS(binaryOperator(                                                                                   
-            hasType(realFloatingPointType())).bind("lhs_bo")),
-  						hasRHS(binaryOperator(hasType(realFloatingPointType())).bind("rhs_bo"))).bind("fadd_ee"), &HandlerFloatVarDecl);
-
+  				hasLHS(anyOf(binaryOperator(
+						hasType(realFloatingPointType())).bind("lhs_bo"),ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("lhs_ee")), 
+						ignoringParenImpCasts(floatLiteral().bind("lhs_literal")))),
+  						hasRHS(anyOf(binaryOperator(hasType(realFloatingPointType())).bind("rhs_bo"), 
+									ignoringParenImpCasts(declRefExpr(
+                    to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
+											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
 		//all binary operators
 		//should be executed after above matcher
 		Matcher2.addMatcher(
