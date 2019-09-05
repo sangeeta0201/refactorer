@@ -51,7 +51,7 @@
 #  6. -Wl,--start-group \   changed to  -Wl, \
 #  7  -Wl,--end-group    changed to  -Wl,
 
-LLVM_SRC_PATH := /home/sangeeta/fpsanitizer/llvm
+LLVM_SRC_PATH := /home/sangeeta/latest_llvm/llvm-project/
 
 # LLVM_BUILD_PATH is the directory in which you built LLVM - where you ran
 # configure or cmake.
@@ -60,7 +60,7 @@ LLVM_SRC_PATH := /home/sangeeta/fpsanitizer/llvm
 # process. It should contain the tools like opt, llc and clang. The default
 # reflects a release build with CMake and Ninja. binary build of LLVM, point it
 # to the bin/ directory.
-LLVM_BUILD_PATH := /home/sangeeta/fpsanitizer/build
+LLVM_BUILD_PATH := /home/sangeeta/latest_llvm/llvm-project/build
 LLVM_BIN_PATH 	:= $(LLVM_BUILD_PATH)/bin
 
 $(info -----------------------------------------------)
@@ -87,9 +87,9 @@ PLUGIN_LDFLAGS := -shared
 # These are required when compiling vs. a source distribution of Clang. For
 # binary distributions llvm-config --cxxflags gives the right path.
 CLANG_INCLUDES := \
-	-I$(LLVM_SRC_PATH)/tools/clang/include \
-	-I$(LLVM_BUILD_PATH)/tools/clang/include \
-	-I$(LLVM_BUILD_PATH)/tools/clang/lib/Headers
+	-I$(LLVM_SRC_PATH)/clang/include \
+	-I$(LLVM_BUILD_PATH)/clang/include \
+	-I$(LLVM_BUILD_PATH)/clang/lib/Headers
 
 # List of Clang libraries to link. The proper -L will be provided by the
 # call to llvm-config
@@ -134,7 +134,6 @@ BUILDDIR := build
 all: make_builddir \
 	emit_build_config \
 	$(BUILDDIR)/refactor_posit \
-	$(BUILDDIR)/refactor_f_to_pos \
 	$(BUILDDIR)/plugin_print_funcnames.so
 
 .PHONY: test
@@ -180,9 +179,6 @@ $(BUILDDIR)/rewritersample: $(SRC_CLANG_DIR)/rewritersample.cpp
 		$(CLANG_LIBS) $(LLVM_LDFLAGS) -o $@
 
 $(BUILDDIR)/refactor_posit: $(SRC_CLANG_DIR)/refactor_posit.cpp
-	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) $(CLANG_INCLUDES) $^ \
-		$(CLANG_LIBS) $(LLVM_LDFLAGS) -o $@
-$(BUILDDIR)/refactor_f_to_pos: $(SRC_CLANG_DIR)/refactor_f_to_pos.cpp
 	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) $(CLANG_INCLUDES) $^ \
 		$(CLANG_LIBS) $(LLVM_LDFLAGS) -o $@
 

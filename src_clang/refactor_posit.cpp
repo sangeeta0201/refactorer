@@ -1,3 +1,18 @@
+/*
+Writing posit applications manually which have nice built in floating point version, could be time and resources consuming.
+This clang pass uses AST matcher and libtool to automatically rewrite floating point applications to use psot type instead.
+ 
+AST matcher matches 
+1. Variable declaration - 
+	double x, y; => posit32_t x, y;
+2. Variable definition:
+	double x = 2.3; => posit32_t = convertDoubletoP32(2.3);
+3. Floating point add,sub, mul,div
+	double x = y + z; => pisit32_t x = p32_add(y,z);
+4. It also finds opportunity to use quire automatically
+	double x = y*z+k => quire x = q16_fdp_add(y,z,k)
+*/
+
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
@@ -118,7 +133,7 @@ public:
 	char* getArrayDim(const VarDecl *VD){
   	int Offset = 0;
   	int StartOffset = 0;
-		SourceLocation StartLoc =  VD->getLocStart();
+		SourceLocation StartLoc =  VD->getSourceRange().getBegin();
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *OrigBuf = SM.getCharacterData(StartLoc);
 		const char *StartBuf = SM.getCharacterData(StartLoc);
@@ -128,15 +143,18 @@ public:
 			StartOffset++;
 		}
   	while (*StartBuf != ';') {
+  		if(*StartBuf == ',') 
+				break;
     	StartBuf++;
 			Offset++;
 		}
-		Offset++;
 		
-		char *result = (char *)malloc(Offset+1);
+		char *result = (char *)malloc(Offset+2);
 		
 		strncpy(result, OrigBuf+StartOffset, Offset);
-		result[Offset] = '\0'; 
+		result[Offset] = ';'; 
+		result[Offset+1] = '\0'; 
+		llvm::errs()<<"result:"<<result<<"\n";
 		return result;
 	}
 
@@ -145,7 +163,6 @@ public:
     int StartOffset = 0;
     SourceManager &SM = Rewrite.getSourceMgr();
     const char *StartBuf = SM.getCharacterData(StartLoc);
-		llvm::errs()<<"removeLine StartBuf:"<<StartBuf<<"\n";
 		unsigned lineNo = getLineNo(StartLoc);
     //is this the last vardecl in stmt? if yes, then removeLine the statement
     while (*StartBuf != ';') {
@@ -158,10 +175,9 @@ public:
 			Rewriter::RewriteOptions Opts;
 			Opts.RemoveLineIfEmpty = true;
     	const char *StartBuf1 = SM.getCharacterData(StartLoc.getLocWithOffset(StartOffset));
-		llvm::errs()<<"removeLine StartBuf1:"<<StartBuf1<<"\n";
-//			llvm::raw_string_ostream stream(StartLoc);
-			//StartLoc.print(stream, SM);
-			Rewrite.RemoveText(StartLoc.getLocWithOffset(-2), Offset+3, Opts); 
+			llvm::errs()<<"Offset:"<<Offset<<"\n";
+			Rewrite.RemoveText(StartLoc.getLocWithOffset(StartOffset), Offset+1, Opts); 
+			//Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
 			ProcessedVD.push_back(lineNo);
 		}
 	}
@@ -222,101 +238,149 @@ public:
 
 	//func(double x) => func(posit32_t x)
 	void ReplaceParmVDWithPosit(const VarDecl *VD, char positLiteral){
-		SourceLocation StartLoc =  VD->getLocStart();
+		SourceLocation StartLoc =  VD->getSourceRange().getBegin();
+		if(!StartLoc.isValid())
+			return;
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *StartBuf = SM.getCharacterData(StartLoc);
 		int Offset = getOffsetUntil(StartBuf, positLiteral);
-		Rewrite.ReplaceText(SourceRange(VD->getLocStart(), VD->getLocStart().getLocWithOffset(Offset-1)), 
+		Rewrite.ReplaceText(SourceRange(StartLoc, StartLoc.getLocWithOffset(Offset-1)), 
 													PositTY);	
 	}
 
 	//double x => posit32_t x
-	void ReplaceVDWithPosit(const VarDecl *VD, std::string positLiteral){
-		SourceLocation StartLoc =  VD->getLocStart();
+	void ReplaceVDWithPosit(SourceLocation StartLoc, std::string positLiteral){
+		if(!StartLoc.isValid())
+			return;
 		SourceManager &SM = Rewrite.getSourceMgr();
-		Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
+//		Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
 		const char *StartBuf = SM.getCharacterData(StartLoc);
 		int Offset = getOffsetUntil(StartBuf, ';');
-		SourceLocation StartLoc1 = VD->getSourceRange().getBegin();
-		std::string IndentStr = getStmtIndentString(StartLoc1);
-		Rewrite.InsertTextAfterToken(VD->getLocStart().getLocWithOffset(Offset), 
-					"\n"+IndentStr+PositTY+VD->getNameAsString()+ positLiteral);
+		std::string IndentStr = getStmtIndentString(StartLoc);
+		Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(Offset), 
+					"\n"+IndentStr+PositTY+positLiteral);
 	
-		removeLine(VD->getSourceRange().getBegin());
+		removeLine(StartLoc);
 	}
 //	x = y * 0.3 => t1 = convertdoubletoposit(0.3)
 	void ReplaceBOLiteralWithPosit(const BinaryOperator *BO, std::string lhs, std::string rhs){
-		SourceLocation StartLoc =  BO->getLocStart();
+		SourceLocation StartLoc =  BO->getSourceRange().getBegin();
+		if(!StartLoc.isValid())
+			return;
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *StartBuf = SM.getCharacterData(StartLoc);
 		int Offset = getOffsetUntil(StartBuf, ';');
 		SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
 		std::string IndentStr = getStmtIndentString(StartLoc1);
-		Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+		Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(Offset), 
 					"\n"+IndentStr+PositTY+lhs +rhs);		
 	}
 
 	//x = y * 0.3 => x = posit_mul(y, t1);
 	//removes the line
 	void ReplaceBOEqWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
-		SourceLocation StartLoc =  BO->getLocStart();
+		SourceLocation StartLoc =  BO->getSourceRange().getBegin();
+		if(!StartLoc.isValid())
+			return;
 		SourceManager &SM = Rewrite.getSourceMgr();
 		const char *StartBuf = SM.getCharacterData(StartLoc);
 		int Offset = getOffsetUntil(StartBuf, ';');
 		SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
 		std::string IndentStr = getStmtIndentString(StartLoc1);
 	
-		Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+		Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(Offset), 
 					"\n"+IndentStr+Op1+" = "+Op2+";\n");
 		BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
-		removeLine(BO->getLocStart());
+		removeLine(BO->getSourceRange().getBegin());
 	}
 
 	//handle all binary operators except assign
 	// x = *0.4*y*z => t1 = posit_mul(y,z);
 	void ReplaceBOWithPosit(const BinaryOperator *BO, std::string Op1, std::string Op2){
 		
-			std::string func = getPositFuncName(BO->getOpcode());
-			SourceLocation StartLoc =  BO->getLocStart();
-			SourceManager &SM = Rewrite.getSourceMgr();
-			const char *StartBuf = SM.getCharacterData(StartLoc);
-			int Offset = getOffsetUntil(StartBuf, ';');
-			SourceLocation StartLoc1 = BO->getSourceRange().getBegin();
-			std::string IndentStr = getStmtIndentString(StartLoc1);
-			const char *StartBuf1 = SM.getCharacterData(BO->getLocStart().getLocWithOffset(Offset));
-			std::string temp, newline;
-			temp = getTempDest();
-			newline = "\0";
-			Rewrite.InsertTextAfterToken(BO->getLocStart().getLocWithOffset(Offset), 
+		std::string func = getPositFuncName(BO->getOpcode());
+		SourceLocation StartLoc =  BO->getSourceRange().getBegin();
+		if(!StartLoc.isValid())
+			return;
+		SourceManager &SM = Rewrite.getSourceMgr();
+		const char *StartBuf = SM.getCharacterData(StartLoc);
+		int Offset = getOffsetUntil(StartBuf, ';');
+		std::string IndentStr = getStmtIndentString(StartLoc);
+		const char *StartBuf1 = SM.getCharacterData(StartLoc.getLocWithOffset(Offset));
+		std::string temp, newline;
+		temp = getTempDest();
+		newline = "\0";
+		Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(Offset), 
 					"\n"+IndentStr+PositTY+temp+" = "+func+"("+Op1+","+Op2+");");
-			BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, temp));	
+		BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, temp));	
 	}
 
   FloatVarDeclHandler(Rewriter &Rewrite) : Rewrite(Rewrite) {}
 
   virtual void run(const MatchFinder::MatchResult &Result) {
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal")){
+			llvm::errs()<<"vd_literal\n";
 			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
 			if(FL != NULL){
-				std::string positLiteral = convertFloatToPosit(FL);
-				ReplaceVDWithPosit(VD, positLiteral);
+				std::string positLiteral = VD->getNameAsString()+convertFloatToPosit(FL);
+				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), positLiteral);
 			}
 			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
 			if(IL != NULL){
 				std::string positLiteral = convertIntToPosit(IL);
-				ReplaceVDWithPosit(VD, positLiteral);
+				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), positLiteral);
 			}
 		}
+		if (const UnaryExprOrTypeTraitExpr *UE = Result.Nodes.getNodeAs<clang::UnaryExprOrTypeTraitExpr>("unary")){
+			llvm::errs()<<"unary:\n";
+			UE->getTypeOfArgument()->dump();
+			QualType QT = UE->getTypeOfArgument();
+      std::string TypeStr = QT.getAsString();
+      SourceManager &SM = Rewrite.getSourceMgr();
+      if(TypeStr.find("double") == 0){
+        const char *Buf = SM.getCharacterData(UE->getSourceRange().getBegin());
+        int StartOffset = 0;
+        while (*Buf != '(') {
+           Buf++;
+          StartOffset++;
+        }
+        StartOffset++;
+				int Offset = 0;
+        while (*Buf != ')') {
+           Buf++;
+					if(*Buf == ' ')
+						break; 
+					if(*Buf == '*')
+						break; 
+          Offset++;
+        }
+
+      //  int RangeSize = TheRewriter.getRangeSize(SourceRange(c->getLocStart(), c->getExprLoc()));
+        Rewrite.ReplaceText(UE->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset, "posit32_t");
+      }
+				//->getName();
+//			ReplaceVDWithPosit(UE->getLocStart(), UE->getNameAsString()+";");
+		}
+		if (const FieldDecl *FD = Result.Nodes.getNodeAs<clang::FieldDecl>("struct")){
+			llvm::errs()<<"struct\n"<<FD->getDeclName();
+			ReplaceVDWithPosit(FD->getSourceRange().getBegin(), FD->getNameAsString()+";");
+		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
+			llvm::errs()<<"vardeclnoinit\n";
+			VD->dump();
+			llvm::errs()<<"\n";
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
   		if (PD) {
 				ReplaceParmVDWithPosit(VD, ' ');
   		}
 			else{
-				ReplaceVDWithPosit(VD, ";");
+				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getNameAsString()+";");
 			}
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclarray")){
+			llvm::errs()<<"vardeclarray\n";
+			VD->dump();
+			llvm::errs()<<"\n";
 			const Type *Ty = VD->getType().getTypePtr();
 			while (Ty->isArrayType()) {                                                             
     		const ArrayType *AT = dyn_cast<ArrayType>(Ty);
@@ -326,9 +390,13 @@ public:
 				return;
 
 			std::string arrayDim = getArrayDim(VD);
-			ReplaceVDWithPosit(VD, arrayDim);
+			llvm::errs()<<"arrayDim:"<<arrayDim<<"\n";
+			ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getNameAsString()+arrayDim);
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclpointer")){
+			llvm::errs()<<"vardeclpointer\n";
+			VD->dump();
+			llvm::errs()<<"\n\n";
 			const Type *Ty = VD->getType().getTypePtr();
 			QualType QT = Ty->getPointeeType();
 			while (!QT.isNull()) {
@@ -344,16 +412,22 @@ public:
 				ReplaceParmVDWithPosit(VD, '*');
   		}
 			else{
-				ReplaceVDWithPosit(VD, ";");
+        Rewrite.ReplaceText(VD->getSourceRange().getBegin(), 6, "posit32_t");
+//				ReplaceVDWithPosit(VD->getLocStart(), VD->getNameAsString()+";");
 			}
 		}
+		if(const CStyleCastExpr *DEL = Result.Nodes.getNodeAs<clang::CStyleCastExpr>("cast")){
+			llvm::errs()<<"cast...\n";
+		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo")){
+			llvm::errs()<<"vardeclbo\n";
 			const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("op");
 			std::string Op1 = BinOp_Temp.at(BO);
-			ReplaceVDWithPosit(VD, " = "+Op1+";");
+			ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getNameAsString()+" = "+Op1+";");
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_ee")){
-			
+			llvm::errs()<<"fadd_ee\n";
+			BO->dump();	
 			//check if this binaryoperator is processed
 			//check if LHS is processed, get its temp variable
 			//check if RHS is processed, get its temp variable
@@ -372,33 +446,81 @@ public:
 			const FloatingLiteral *FL_rhs = Result.Nodes.getNodeAs<clang::FloatingLiteral>("rhs_literal");
 			const BinaryOperator *BO_lhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("lhs_bo");
 			const BinaryOperator *BO_rhs = Result.Nodes.getNodeAs<clang::BinaryOperator>("rhs_bo");
+			const ImplicitCastExpr *ASE_lhs = Result.Nodes.getNodeAs<clang::ImplicitCastExpr>("lhs_array");
+			const ImplicitCastExpr *ASE_rhs = Result.Nodes.getNodeAs<clang::ImplicitCastExpr>("rhs_array");
+			const ImplicitCastExpr *ASE_lhsItoD = Result.Nodes.getNodeAs<clang::ImplicitCastExpr>("lhs_intToD");
+			const ImplicitCastExpr *ASE_rhsItoD = Result.Nodes.getNodeAs<clang::ImplicitCastExpr>("rhs_intToD");
+
+
 
 			std::string Op1, Op2, lhs, rhs;
 			if(FL_lhs){
+				llvm::errs()<<"FL_lhs\n";	
 				lhs = getTempDest();
 				rhs  = convertFloatToPosit(FL_lhs);
 				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
 				Op1 = lhs;
 			}
 			else if(BO_lhs){
+				llvm::errs()<<"BO_lhs\n";	
 				Op1 = BinOp_Temp.at(BO_lhs);
 			}
+			else if(ASE_lhs){
+				llvm::errs()<<"ASE_lhs\n";	
+      	llvm::raw_string_ostream stream(Op1);
+      	ASE_lhs->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	stream.flush();
+      	llvm::errs()<<"opName:"<<Op1<<"\n"; 
+			}
+			else if(ASE_lhsItoD){
+				llvm::errs()<<"ASE_lhsItoD\n";	
+      	llvm::raw_string_ostream stream(Op1);
+      	ASE_lhsItoD->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	stream.flush();
+				lhs = getTempDest();
+				rhs = " = convertDoubleToP32(" + Op1+");";
+				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
+        Op1 = lhs;
+      	llvm::errs()<<"opName:"<<Op1<<"\n"; 
+			}
 			else if(DEL){
+				llvm::errs()<<"DEL_lhs\n";	
 				Op1 = DEL->getDecl()->getName();
 			}
 			else
 				assert("fadd_ee: operand not handled!!!");
 
 			if(FL_rhs){
+				llvm::errs()<<"FL_rhs\n";	
 				lhs = getTempDest();
 				rhs  = convertFloatToPosit(FL_rhs);
 				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
 				Op2 = lhs;
 			}
 			else if(BO_rhs){
+				llvm::errs()<<"BO_rhs\n";	
 				Op2 = BinOp_Temp.at(BO_rhs);
 			}
+			else if(ASE_rhs){
+				llvm::errs()<<"ASE_rhs\n";	
+      	llvm::raw_string_ostream stream(Op2);
+      	ASE_rhs->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	stream.flush();
+      	llvm::errs()<<"opName:"<<Op2<<"\n"; 
+			}
+			else if(ASE_rhsItoD){
+				llvm::errs()<<"ASE_rhsItoD\n";	
+      	llvm::raw_string_ostream stream(Op2);
+      	ASE_rhsItoD->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	stream.flush();
+				lhs = getTempDest();
+				rhs = " = convertDoubleToP32(" + Op2+");";
+				ReplaceBOLiteralWithPosit(BO, lhs, rhs);
+        Op2 = lhs;
+      	llvm::errs()<<"opName:"<<Op2<<"\n"; 
+			}
 			else if(DER){
+				llvm::errs()<<"DER\n";	
 				Op2 = DER->getDecl()->getName();
 			}
 			else{
@@ -436,7 +558,7 @@ public:
 		//matcher for  double x, y;
 		//ignores double x = x + y;
 		Matcher.addMatcher(
-			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
+			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), unless(hasType(arrayType())), 
 				unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), unless(hasDescendant(binaryOperator()))).
 					bind("vardeclnoinit"), &HandlerFloatVarDecl);
 
@@ -446,9 +568,12 @@ public:
 			varDecl(hasType(pointerType())). 
 					bind("vardeclpointer"), &HandlerFloatVarDecl);
 
+		Matcher.addMatcher(cStyleCastExpr().bind("cast")
+					, &HandlerFloatVarDecl);
+	//match structs with floating point field elements
 		Matcher.addMatcher(
-			typedefDecl().
-					bind("vardeclstruct"), &HandlerFloatVarDecl);
+			fieldDecl(hasType(realFloatingPointType())).bind("struct"), &HandlerFloatVarDecl);
+
 		Matcher.addMatcher(
 			varDecl(hasType(arrayType()), unless(	hasInitializer(initListExpr()	))).
 					bind("vardeclarray"), &HandlerFloatVarDecl);
@@ -457,14 +582,31 @@ public:
 			cxxMethodDecl(hasAnyParameter(hasType(realFloatingPointType()))).
 				bind("vardeclnoinit"), &HandlerFloatVarDecl);
 
+  const auto FloatPtrType = pointerType(pointee(realFloatingPointType()));
+	 const auto PointerToFloat = 
+      hasType(qualType(hasCanonicalType(pointerType(pointee(realFloatingPointType())))));
+
+
+		Matcher.addMatcher(
+			unaryExprOrTypeTraitExpr(ofKind(UETT_SizeOf)).
+				bind("unary"), &HandlerFloatVarDecl);
+
+		// Detect sizeof(kPtr) where kPtr is 'const char* kPtr = "abc"';
+
+
+
 		//all binary operators, except '=' and binary operators which have operand as binary operator
 		Matcher.addMatcher(
-			binaryOperator(unless(hasOperatorName("=")),
+			binaryOperator(unless(hasOperatorName("=")), hasType(realFloatingPointType()),
   				hasLHS(anyOf(ignoringParenImpCasts(declRefExpr(
                     to(varDecl(hasType(realFloatingPointType())))).bind("lhs_ee")), 
+						implicitCastExpr(unless(hasImplicitDestinationType(realFloatingPointType()))).bind("lhs_array"),
+						 implicitCastExpr(hasImplicitDestinationType(realFloatingPointType())).bind("lhs_intToD"),
 						ignoringParenImpCasts(floatLiteral().bind("lhs_literal")))),
   						hasRHS(anyOf(ignoringParenImpCasts(declRefExpr(
                     to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
+										implicitCastExpr(unless(hasImplicitDestinationType(realFloatingPointType()))).bind("rhs_array"),
+						 				implicitCastExpr(hasImplicitDestinationType(realFloatingPointType())).bind("rhs_intToD"),
 											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
 
 
@@ -485,12 +627,20 @@ public:
   				hasLHS(anyOf(binaryOperator(
 						hasType(realFloatingPointType())).bind("lhs_bo"),ignoringParenImpCasts(declRefExpr(
                     to(varDecl(hasType(realFloatingPointType())))).bind("lhs_ee")), 
+						implicitCastExpr(unless(hasImplicitDestinationType(realFloatingPointType()))).bind("lhs_array"),
+						 implicitCastExpr(hasImplicitDestinationType(realFloatingPointType())).bind("lhs_intToD"),
 						ignoringParenImpCasts(floatLiteral().bind("lhs_literal")))),
   						hasRHS(anyOf(binaryOperator(hasType(realFloatingPointType())).bind("rhs_bo"), 
 									ignoringParenImpCasts(declRefExpr(
                     to(varDecl(hasType(realFloatingPointType())))).bind("rhs_ee")), 
-											ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
-
+										implicitCastExpr(unless(hasImplicitDestinationType(realFloatingPointType()))).bind("rhs_array"),
+						 					implicitCastExpr(hasImplicitDestinationType(realFloatingPointType())).bind("rhs_intToD"),
+												ignoringParenImpCasts(floatLiteral().bind("rhs_literal"))))).bind("fadd_ee"), &HandlerFloatVarDecl);
+/*
+		Matcher2.addMatcher(
+			binaryOperator(hasLHS(ignoringParens(binaryOperator(hasType(realFloatingPointType())))))
+												, &HandlerFloatVarDecl);
+*/
 		//double t = 0.5 + x + z * y ;   
 		Matcher3.addMatcher(
 			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
@@ -543,7 +693,7 @@ public:
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
                                                  StringRef file) override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return llvm::make_unique<MyASTConsumer>(TheRewriter);
+    return std::make_unique<MyASTConsumer>(TheRewriter);
   }
 
 private:
