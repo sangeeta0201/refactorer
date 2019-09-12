@@ -51,6 +51,7 @@ std::stringstream SSBefore;
 unsigned tmpCount = 0;
 
 std::set<const Stmt *> ForceBracesStmts;
+std::map<const IfStmt*, SourceLocation> BinIfLoc; 
 std::map<const BinaryOperator*, std::string> BinOp_Temp; 
 std::map<const BinaryOperator*, SourceLocation> BinLoc_Temp; 
 std::map<const BinaryOperator*, const CallExpr*> BinParentCE; 
@@ -268,6 +269,30 @@ public:
 		return "tmp"+std::to_string(tmpCount);
 	}
 
+	std::string getPositBinOp(unsigned Opcode){
+		string funcName;
+		switch(Opcode){
+			case BO_EQ:
+				funcName = "p32_eq";
+				break;
+			case BO_LE:
+				funcName = "p32_le";
+				break;
+			case BO_LT:
+				funcName = "p32_lt";
+				break;
+			case BO_GE:
+				funcName = "!p32_lt";
+				break;
+			case BO_GT:
+				funcName = "!p32_le";
+				break;
+			default:
+				assert("This opcode is not handled!!!");
+		}
+		return funcName;
+	}
+
 	std::string getPositFuncName(unsigned Opcode){
 		string funcName;
 		switch(Opcode){
@@ -377,6 +402,12 @@ public:
 		int Offset = -1;
 		std::string temp;
 		temp = getTempDest();
+		if(BinParentST.count(BO) != 0){
+			auto ST = BinParentST.at(BO);
+		 	if(const IfStmt *IfSt = dyn_cast<IfStmt>(ST)) {
+				BOStartLoc = BinIfLoc.at(IfSt); 
+			}
+		}
 		switch(Opcode){
 			case::BO_Add:
 			case::BO_Mul:
@@ -430,9 +461,6 @@ public:
 			}
 			else
 				Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd()), temp);
-		}
-		if(BinParentST.count(BO) != 0){
-			Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd()), temp);
 		}
 		if(BinParentBO.count(BO) != 0){
 	//		if(BinParentBO.at(BO)->getOpcode() == BO_Assign)
@@ -571,6 +599,7 @@ public:
 				llvm::errs()<<"Op is binaryOperator\n";
 				if(BinOp_Temp.count(BO_lhs) != 0){
 					Op1 = BinOp_Temp.at(BO_lhs);
+					llvm::errs()<<"Op is found:op:"<<Op1<<"\n";
 				}
 			}
 			else if(ImplicitCastExpr *ASE_lhs = dyn_cast<ImplicitCastExpr>(Op)){
@@ -796,6 +825,7 @@ if (InitialLoc.isInvalid())
 	Rewrite.InsertText(EndLoc, ClosingInsertion, true, true); 
   return true;
 }
+
   FloatVarDeclHandler(Rewriter &Rewrite) : Rewrite(Rewrite) {}
 
   virtual void run(const MatchFinder::MatchResult &Result) {
@@ -813,10 +843,11 @@ if (InitialLoc.isInvalid())
 				return;
 			checkStmt(Result, S->getBody(), StartLoc);	
 		} else if (auto S = Result.Nodes.getNodeAs<IfStmt>("if")) {
-			llvm::errs()<<"found if***\n";
 			SourceLocation StartLoc = findRParenLoc(S, SM, Context);
 			if (StartLoc.isInvalid())
 				return;
+			llvm::errs()<<"found if***\n";
+			BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, S->getSourceRange().getBegin()));	
 			if (ForceBracesStmts.erase(S))
 				ForceBracesStmts.insert(S->getThen());
 			bool BracedIf = checkStmtWithLoc(Result, S->getThen(), StartLoc, S->getElseLoc());
@@ -827,8 +858,28 @@ if (InitialLoc.isInvalid())
 			// Omit 'else if' statements here, they will be handled directly.	
 				checkStmt(Result, Else, S->getElseLoc());
 			}
+			if (const BinaryOperator *BinOp = llvm::dyn_cast<BinaryOperator>(S->getCond())) {
+				SourceLocation StartLoc = BinOp->getSourceRange().getBegin();
+				SourceLocation EndLoc = BinOp->getSourceRange().getEnd();
+				std::string func = getPositBinOp(BinOp->getOpcode());
+				std::string Op1 = handleOperand(BinOp, StartLoc, BinOp->getLHS());
+				std::string Op2 = handleOperand(BinOp, StartLoc, BinOp->getRHS());
+				llvm::errs()<<"bin if Op1:"<<Op1<<" Op2:"<<Op2<<"\n";
+				Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), func+"("+Op1+","+Op2+")");
+			}
 		}
-
+		if (auto S = Result.Nodes.getNodeAs<IfStmt>("curif")) {
+			llvm::errs()<<"matched if\n";
+			S->dump();
+			llvm::errs()<<"****\n";
+			auto topIf = Result.Nodes.getNodeAs<IfStmt>("topif");
+			auto itr = BinIfLoc.find(S); 
+     	if (itr != BinIfLoc.end()){
+          (*itr).second = topIf->getSourceRange().getBegin();
+     	}
+			else
+				BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, topIf->getSourceRange().getBegin()));	
+		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("boassignvd")){
 			llvm::errs()<<"boassignvd\n";
 			std::string opName;
@@ -1248,6 +1299,7 @@ if (InitialLoc.isInvalid())
 			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo");
 			const BinaryOperator *BA = Result.Nodes.getNodeAs<clang::BinaryOperator>("bobo");
 			const Stmt *ST = Result.Nodes.getNodeAs<clang::ReturnStmt>("returnbo");
+			auto IfST = Result.Nodes.getNodeAs<IfStmt>("ifstmtbo");
 			//We need to handle deepest node first in AST, but there is no way to traverse AST from down to up.
 			//We store all binaryoperator in stack.
 			//Handle all binop in stack in handleBinOp
@@ -1272,6 +1324,25 @@ if (InitialLoc.isInvalid())
 				}
 				BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
 				BinParentBO.insert(std::pair<const BinaryOperator*, const BinaryOperator*>(BO, BA));	
+			}
+			if(IfST){
+				llvm::errs()<<"If ST loc\n";
+			llvm::errs()<<"found if***\n";
+			SourceLocation StartLoc = findRParenLoc(IfST, SM, Context);
+		//	if (StartLoc.isInvalid())
+		//		return;
+		//	if (ForceBracesStmts.erase(S))
+		//		ForceBracesStmts.insert(S->getThen());
+		//	bool BracedIf = checkStmtWithLoc(Result, IfST->getThen(), StartLoc, IfST->getElseLoc());
+	//		const Stmt *Else = IfST->getElse();
+	//		if (Else && BracedIf)
+	//			ForceBracesStmts.insert(Else);
+//			if (Else && !isa<IfStmt>(Else)) {
+			// Omit 'else if' statements here, they will be handled directly.	
+//				checkStmt(Result, Else, S->getElseLoc());
+//		}
+				BinParentST.insert(std::pair<const BinaryOperator*, const Stmt*>(BO, IfST));	
+				BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
 			}
 			if(ST){
 				llvm::errs()<<"ST loc\n";
@@ -1307,7 +1378,8 @@ public:
 
 	//check if there are open braces around statement, if not insert them
 	//rewritten using clang-tidy BracesAroundStatementsCheck
-	Matcher.addMatcher(ifStmt().bind("if"), &HandlerFloatVarDecl);
+	Matcher4.addMatcher(ifStmt().bind("if"), &HandlerFloatVarDecl);
+	Matcher.addMatcher(ifStmt(hasAncestor(ifStmt(unless(hasAncestor(ifStmt()))).bind("topif"))).bind("curif"), &HandlerFloatVarDecl);
   Matcher.addMatcher(whileStmt().bind("while"), &HandlerFloatVarDecl);
   Matcher.addMatcher(doStmt().bind("do"), &HandlerFloatVarDecl);
   Matcher.addMatcher(forStmt().bind("for"), &HandlerFloatVarDecl);
@@ -1423,12 +1495,13 @@ public:
 																						unless(hasOperatorName("=")),
 																							anyOf(hasAncestor(varDecl().bind("vardeclbo")), 
 																									hasAncestor(callExpr().bind("callbo")),
-																									hasAncestor(returnStmt().bind("returnbo")),
-																										hasAncestor(binaryOperator(hasOperatorName("=")).bind("bobo")),
-																										hasAncestor(binaryOperator(hasOperatorName("/=")).bind("bobo")),
-																										hasAncestor(binaryOperator(hasOperatorName("*=")).bind("bobo")),
-																										hasAncestor(binaryOperator(hasOperatorName("-=")).bind("bobo")),
-																											hasAncestor(binaryOperator(hasOperatorName("+=")).bind("bobo")))).bind("fadd_be");
+																										hasAncestor(returnStmt().bind("returnbo")),
+																											hasAncestor(ifStmt().bind("ifstmtbo")),
+																												hasAncestor(binaryOperator(hasOperatorName("=")).bind("bobo")),
+																													hasAncestor(binaryOperator(hasOperatorName("/=")).bind("bobo")),
+																														hasAncestor(binaryOperator(hasOperatorName("*=")).bind("bobo")),
+																															hasAncestor(binaryOperator(hasOperatorName("-=")).bind("bobo")),
+																																hasAncestor(binaryOperator(hasOperatorName("+=")).bind("bobo")))).bind("fadd_be");
 	
 		Matcher1.addMatcher(BinOp1, &HandlerFloatVarDecl);
 	
@@ -1481,8 +1554,8 @@ public:
     Matcher.matchAST(Context);
     Matcher1.matchAST(Context);
     Matcher3.matchAST(Context);
-    Matcher4.matchAST(Context);
 		HandlerFloatVarDecl.handleBinOp(Context);
+    Matcher4.matchAST(Context);
     Matcher2.matchAST(Context);
   }
 
