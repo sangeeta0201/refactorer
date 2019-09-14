@@ -62,6 +62,7 @@ std::stack<const BinaryOperator*> BOStack;
 SmallVector<unsigned, 8> ProcessedLine;
 SmallVector<const BinaryOperator*, 8> ProcessedBO;
 SmallVector<const FloatingLiteral*, 8> ProcessedFL;
+SmallVector<const InitListExpr*, 8> ProcessedILE;
 SmallVector<const IntegerLiteral*, 8> ProcessedIL;
 SmallVector<const VarDecl*, 8> ProcessedVD;
 
@@ -181,6 +182,8 @@ public:
 		}
   	while (*StartBuf != ';') {
   		if(*StartBuf == ',') 
+				break;
+  		if(*StartBuf == '=') 
 				break;
     	StartBuf++;
 			Offset++;
@@ -402,12 +405,6 @@ public:
 		int Offset = -1;
 		std::string temp;
 		temp = getTempDest();
-		if(BinParentST.count(BO) != 0){
-			auto ST = BinParentST.at(BO);
-		 	if(const IfStmt *IfSt = dyn_cast<IfStmt>(ST)) {
-				BOStartLoc = BinIfLoc.at(IfSt); 
-			}
-		}
 		switch(Opcode){
 			case::BO_Add:
 			case::BO_Mul:
@@ -446,6 +443,14 @@ public:
 		}
 			//update parent
 
+		SourceLocation StartLoc = BO->getSourceRange().getBegin();
+		if (StartLoc.isMacroID()) {
+    	StartLoc = SM.getFileLoc(StartLoc); 
+		}
+		SourceLocation EndLoc = BO->getSourceRange().getEnd();
+		if (EndLoc.isMacroID()) {
+    	EndLoc = SM.getFileLoc(StartLoc); 
+		}
 		if(BinParentCE.count(BO) != 0){
 			const CallExpr *CE = BinParentCE.at(BO);
 			const FunctionDecl *Func = CE->getDirectCallee();
@@ -457,14 +462,13 @@ public:
 				tmp = getTempDest();
 				Rewrite.InsertText(CE->getSourceRange().getBegin(), 
 									"double "+tmp +" = "+convert+"\n", true, true);		
-				Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd()), tmp);
+				Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), tmp);
 			}
 			else
-				Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd()), temp);
+				Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
 		}
 		if(BinParentBO.count(BO) != 0){
-	//		if(BinParentBO.at(BO)->getOpcode() == BO_Assign)
-			Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd()), temp);
+			Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
 		}
 		if(BinParentVD.count(BO) != 0){
 			const VarDecl* VD = BinParentVD.at(BO);
@@ -491,14 +495,21 @@ public:
 
 			SourceLocation StartLoc = BinLoc_Temp.at(BO);
 			
-
+			if(BinParentST.count(BO) != 0){
+				auto ST = BinParentST.at(BO);
+		 		if(const IfStmt *IfSt = dyn_cast<IfStmt>(ST)) {
+					StartLoc = BinIfLoc.at(IfSt); 
+				}
+			}
+			unsigned lineNo = getLineNo(StartLoc);
+			llvm::errs()<<"handleBinOp lineNo:"<<lineNo<<"\n";
 			std::string Op1Str = handleOperand(BO, StartLoc, Op1);
 			std::string Op2Str = handleOperand(BO, StartLoc, Op2);
 
 			llvm::errs()<<"Op1:"<<Op1Str<<"\n";
 			llvm::errs()<<"Op2:"<<Op2Str<<"\n";
 
-			ReplaceBOWithPosit(BO, BinLoc_Temp.at(BO), Op1Str, Op2Str);
+			ReplaceBOWithPosit(BO, StartLoc, Op1Str, Op2Str);
 		}		
 	}
 	bool isPointerToFloatingType(const Type *Ty){
@@ -570,7 +581,7 @@ public:
 			if(FloatingLiteral *FL_lhs = dyn_cast<FloatingLiteral>(Op)){
 				llvm::errs()<<"Op is floatliteral\n";
 				lhs = getTempDest();
-				rhs  = convertFloatToPosit(FL_lhs);
+				rhs = convertFloatToPosit(FL_lhs);
 				ReplaceBOLiteralWithPosit(BO, StartLoc, lhs, " = "+rhs);
 				Op1 = lhs;
 			}
@@ -858,6 +869,24 @@ if (InitialLoc.isInvalid())
 			// Omit 'else if' statements here, they will be handled directly.	
 				checkStmt(Result, Else, S->getElseLoc());
 			}
+		}
+		if (auto S = Result.Nodes.getNodeAs<ConditionalOperator>("ifcond")) {
+			llvm::errs()<<"condition......\n";
+			S->getCond()->dump();
+			if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("cond")) {
+			llvm::errs()<<"condition......\n";
+				SourceLocation StartLoc = BinOp->getSourceRange().getBegin();
+				SourceLocation EndLoc = BinOp->getSourceRange().getEnd();
+				std::string func = getPositBinOp(BinOp->getOpcode());
+				std::string Op1 = handleOperand(BinOp, StartLoc, BinOp->getLHS());
+				std::string Op2 = handleOperand(BinOp, StartLoc, BinOp->getRHS());
+				llvm::errs()<<"bin if Op1:"<<Op1<<" Op2:"<<Op2<<"\n";
+				Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
+				Rewrite.ReplaceText(BinOp->getSourceRange(), func+"("+Op1+","+Op2+")");
+				Rewrite.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
+			}
+		}
+		if (auto S = Result.Nodes.getNodeAs<IfStmt>("ifcond")) {
 			if (const BinaryOperator *BinOp = llvm::dyn_cast<BinaryOperator>(S->getCond())) {
 				SourceLocation StartLoc = BinOp->getSourceRange().getBegin();
 				SourceLocation EndLoc = BinOp->getSourceRange().getEnd();
@@ -895,22 +924,6 @@ if (InitialLoc.isInvalid())
 			if(IL){
 				std::string positLiteral = convertIntToPosit(IL);
 				Rewrite.ReplaceText(SourceRange(IL->getSourceRange().getBegin(), IL->getSourceRange().getEnd()), positLiteral);
-			}
-		}
-		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal")){
-			llvm::errs()<<"vd_literal\n";
-			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
-			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
-			if(FL != NULL){
-				std::string positLiteral = VD->getNameAsString()+" = "+convertFloatToPosit(FL);
-				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
-			}
-			else if(IL != NULL){
-				std::string positLiteral = VD->getNameAsString()+" = "+convertIntToPosit(IL);
-				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
-			}
-			else{
-				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), 6, PositTY);
 			}
 		}
 		if (const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("initintegerliteral")){
@@ -961,10 +974,13 @@ if (InitialLoc.isInvalid())
 				}
     	}
 		}
-		if (const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("initfloatliteral")){
+		if (const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("finit")){
+			llvm::errs()<<"finit\n";
+		}
+		if (const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("initfloatliteral_vd")){
 			llvm::errs()<<"initfloatliteral\n";
 			const InitListExpr *ILE = Result.Nodes.getNodeAs<clang::InitListExpr>("init");
-			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal");
+			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("init_literal");
 			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
 
 			//initListExpr is visited twice, need to keep a set of visited nodes
@@ -1012,6 +1028,70 @@ if (InitialLoc.isInvalid())
 				}
 			}
 		}
+		if (const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("initfloatliteral")){
+			const InitListExpr *ILE = Result.Nodes.getNodeAs<clang::InitListExpr>("init");
+			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("init_literal");
+			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
+
+			SmallVector<const InitListExpr*, 8>::iterator ite;
+			ite = std::find(ProcessedILE.begin(), ProcessedILE.end(), ILE);
+			if(ite == ProcessedILE.end()){
+				Rewrite.InsertText(VD->getSourceRange().getBegin(), 
+					"__attribute__ ((constructor)) void __init_"+VD->getNameAsString()+"(void){\n", true, true);
+			}
+			//initListExpr is visited twice, need to keep a set of visited nodes
+			SmallVector<const FloatingLiteral*, 8>::iterator it;
+			it = std::find(ProcessedFL.begin(), ProcessedFL.end(), FL);		
+			if(it != ProcessedFL.end())
+				return;
+			
+			ProcessedFL.push_back(FL);
+
+			std::string temp;
+    	temp = getTempDest();
+			std::string positLiteral = " = "+convertFloatToPosit(FL);
+			Rewrite.InsertText(VD->getSourceRange().getBegin(), 
+					"        "+PositTY+temp+ positLiteral+"\n", true, true);
+			SourceManager &SM = Rewrite.getSourceMgr();
+			const char *Buf = SM.getCharacterData(FL->getSourceRange().getBegin());
+			int Offset = 0;
+			while (*Buf != ';') {
+				if(*Buf == ',')
+					break;
+				if(*Buf == '}')
+					break;
+				Buf++;
+				Offset++;
+			}
+			const char *Buf1 = SM.getCharacterData(FL->getSourceRange().getBegin().getLocWithOffset(Offset));
+			Rewrite.ReplaceText(FL->getSourceRange().getBegin(), Offset, temp);
+
+			const char *BufVD = SM.getCharacterData(VD->getSourceRange().getBegin());
+			int VDOffset = 0;
+			while (*BufVD != ';') {
+				if(*BufVD == ' ')
+					break;
+				if(*BufVD == '*')	
+					break;
+				BufVD++;
+				VDOffset++;
+			}
+			SmallVector<const VarDecl*, 8>::iterator itvd;
+			itvd = std::find(ProcessedVD.begin(), ProcessedVD.end(), VD);		
+			if(itvd == ProcessedVD.end()){
+				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), VDOffset, "       ");
+				ProcessedVD.push_back(VD);
+			}
+			if(ite == ProcessedILE.end()){
+				Rewrite.InsertTextAfterToken(VD->getSourceRange().getEnd().getLocWithOffset(1), 
+					"\n}\n");
+				
+				std::string arrayDim = getArrayDim(VD);
+				Rewrite.InsertTextAfterToken(VD->getSourceRange().getEnd().getLocWithOffset(1), 
+					 PositTY+" "+VD->getNameAsString()+arrayDim);
+				ProcessedILE.push_back(ILE);
+			}
+		}
 		if (const UnaryExprOrTypeTraitExpr *UE = Result.Nodes.getNodeAs<clang::UnaryExprOrTypeTraitExpr>("unary")){
 			llvm::errs()<<"unary\n";
 			QualType QT = UE->getTypeOfArgument();
@@ -1042,6 +1122,22 @@ if (InitialLoc.isInvalid())
 			llvm::errs()<<"struct\n";
 			ReplaceVDWithPosit(FD->getSourceRange().getBegin(), FD->getSourceRange().getEnd(), FD->getNameAsString()+";");
 		}
+		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vd_literal")){
+			llvm::errs()<<"vd_literal\n";
+			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
+			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
+			if(FL != NULL){
+				std::string positLiteral = VD->getNameAsString()+" = "+convertFloatToPosit(FL);
+				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
+			}
+			else if(IL != NULL){
+				std::string positLiteral = VD->getNameAsString()+" = "+convertIntToPosit(IL);
+				ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
+			}
+			else{
+				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), 6, PositTY);
+			}
+		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
 			llvm::errs()<<"vardeclnoinit\n";
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
@@ -1063,7 +1159,8 @@ if (InitialLoc.isInvalid())
 				return;
 
 			std::string arrayDim = getArrayDim(VD);
-			ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), VD->getNameAsString()+arrayDim+"\n");
+				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), 6, PositTY);
+			//ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), VD->getNameAsString()+arrayDim+"\n");
 		}
 		if (const FunctionDecl *FD = Result.Nodes.getNodeAs<clang::FunctionDecl>("returnfp")){
 			llvm::errs()<<"returnfp\n";
@@ -1170,61 +1267,6 @@ if (InitialLoc.isInvalid())
 									"\n"+IndentStr+"}");		
 			}
 		}
-/*
-		if(const IfStmt *IF = Result.Nodes.getNodeAs<clang::IfStmt>("ifstmt")){
-			llvm::errs()<<"if stmt\n\n\n\n";
-			const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("cond");
-			std::string PositCond;
-			switch(BO->getOpcode()){
-				case BO_EQ:
-					PositCond = "p32_eq";
-					break;
-				case BO_LE:
-					PositCond = "p32_le";
-					break;
-				case BO_LT:
-					PositCond = "p32_lt";
-					break;
-				case BO_GE:
-					PositCond = "!p32_lt";
-					break;
-				case BO_GT:
-					PositCond = "!p32_le";
-					break;
-			}
-			SourceManager &SM = Rewrite.getSourceMgr();
-			SourceLocation StartLoc = IF->getSourceRange().getBegin();
-			const char *StartBuf = SM.getCharacterData(StartLoc);
-			unsigned StartOffset = 0;	
-			while (*StartBuf != ')' ){
-    		StartBuf++;
-				StartOffset++;
-			}
-			Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(StartOffset), 
-									"{");		
-			std::string IndentStr = getStmtIndentString(StartLoc);
-			SourceRange StmtRange = IF->getSourceRange();
-			SourceLocation LocEnd = getEndLocation(StmtRange);
-			const Stmt *ElseB = IF->getElse();
-			if(ElseB){
-				Rewrite.InsertText(IF->getElseLoc(), 
-									"}\n", true, true);	//close if	
-				unsigned Offset = 0;
-				llvm::errs()<<"StartBuf:"<<*StartBuf<<"\n";
-				const char *StartBuf = SM.getCharacterData(IF->getElseLoc());
-				//check if there is if after else
-				while (*StartBuf != '(' ){
-					if(*StartBuf == 'i'
-    			StartBuf++;
-					Offset++;
-				}
-				if(*StartBuf == 'i' 
-			}
-			else{
-   	 		Rewrite.InsertTextAfterToken(LocEnd, "\n"+IndentStr+"}\n"); //close if
-			}
-		}
-*/
 		if(const CallExpr *CE = Result.Nodes.getNodeAs<clang::CallExpr>("printfsqrt")){
 			llvm::errs()<<"printfsqrt\n";
       SourceManager &SM = Rewrite.getSourceMgr();
@@ -1378,8 +1420,15 @@ public:
 
 	//check if there are open braces around statement, if not insert them
 	//rewritten using clang-tidy BracesAroundStatementsCheck
-	Matcher4.addMatcher(ifStmt().bind("if"), &HandlerFloatVarDecl);
+	Matcher.addMatcher(ifStmt().bind("if"), &HandlerFloatVarDecl);
 	Matcher.addMatcher(ifStmt(hasAncestor(ifStmt(unless(hasAncestor(ifStmt()))).bind("topif"))).bind("curif"), &HandlerFloatVarDecl);
+	Matcher4.addMatcher(ifStmt(hasCondition(ignoringParenImpCasts(ignoringParens(
+		binaryOperator(hasEitherOperand(hasType(realFloatingPointType()))))))).bind("ifcond"), &HandlerFloatVarDecl);
+	Matcher4.addMatcher(conditionalOperator(
+			hasCondition(ignoringParenImpCasts(ignoringParens(
+				binaryOperator(hasEitherOperand(
+					hasType(realFloatingPointType()))).bind("cond"))))).bind("ifcond"), &HandlerFloatVarDecl);
+	//Matcher4.addMatcher(conditionalOperator(hasCondition()).bind("ifcond"), &HandlerFloatVarDecl);
   Matcher.addMatcher(whileStmt().bind("while"), &HandlerFloatVarDecl);
   Matcher.addMatcher(doStmt().bind("do"), &HandlerFloatVarDecl);
   Matcher.addMatcher(forStmt().bind("for"), &HandlerFloatVarDecl);
@@ -1390,14 +1439,26 @@ public:
 	Matcher.addMatcher(
 				varDecl(hasType(realFloatingPointType()), anyOf(hasInitializer(ignoringParenImpCasts(
 					integerLiteral().bind("intliteral"))), hasInitializer(ignoringParenImpCasts(
-          floatLiteral().bind("floatliteral"))), hasDescendant(binaryOperator(hasOperatorName("=")))))
+          floatLiteral().bind("floatliteral"))), hasDescendant(callExpr()), hasDescendant(binaryOperator(hasOperatorName("=")))))
 						.bind("vd_literal"), &HandlerFloatVarDecl);
-
+/*
+	//double x[2] = {2.3, 3.4}
 	Matcher.addMatcher(
-			floatLiteral(hasAncestor(initListExpr(hasAncestor(varDecl().
-					bind("vd_literal"))).bind("init"))).
-						bind("initfloatliteral"), &HandlerFloatVarDecl);
-
+			floatLiteral(hasAncestor(initListExpr(
+					unless(hasAncestor(initListExpr().bind("topinit"))), hasAncestor(varDecl().
+						bind("init_literal"))).bind("init"))).
+							bind("initfloatliteral"), &HandlerFloatVarDecl);
+*/
+	Matcher.addMatcher(
+			floatLiteral(hasAncestor(initListExpr(unless(hasAncestor(initListExpr().bind("init")))).bind("init")), 
+				hasAncestor(varDecl(hasLocalStorage()).                                                                                       
+            bind("init_literal"))).
+				bind("initfloatliteral_vd"), &HandlerFloatVarDecl);
+	Matcher.addMatcher(
+			floatLiteral(hasAncestor(initListExpr(unless(hasAncestor(initListExpr().bind("init")))).bind("init")), 
+				hasAncestor(varDecl(hasGlobalStorage()).                                                                                       
+            bind("init_literal"))).
+				bind("initfloatliteral"), &HandlerFloatVarDecl);
 		//	foo(-2.0);
 		Matcher.addMatcher(
 			floatLiteral(hasAncestor(callExpr().bind("callfunc")), unless(hasAncestor(binaryOperator()))).
@@ -1411,9 +1472,12 @@ public:
 		//matcher for  double x, y;
 		//ignores double x = x + y;
 		Matcher.addMatcher(
-			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), unless(hasType(arrayType())), 
-				unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), unless(hasDescendant(binaryOperator()))).
-					bind("vardeclnoinit"), &HandlerFloatVarDecl);
+			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 		
+				unless(hasType(arrayType())), 
+					unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), 
+						unless(hasDescendant(callExpr())),
+							unless(hasDescendant(binaryOperator()))).
+								bind("vardeclnoinit"), &HandlerFloatVarDecl);
 
 
 		//pointer
@@ -1469,7 +1533,7 @@ public:
 					bind("returnparent"), &HandlerFloatVarDecl);
 
 		Matcher.addMatcher(
-			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), 
+			varDecl(hasType(realFloatingPointType()), unless( hasInitializer(floatLiteral())), unless( hasDescendant(callExpr())), 
 				unless( hasInitializer(ignoringParenImpCasts(integerLiteral()))), hasDescendant(binaryOperator().bind("op"))).
 					bind("vardeclparent"), &HandlerFloatVarDecl);
 
