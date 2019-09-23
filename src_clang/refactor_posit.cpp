@@ -38,6 +38,7 @@ using namespace clang::ast_matchers;
 using namespace clang::driver;
 using namespace clang::tooling;
 
+SourceLocation IfStartLoc;
 static llvm::cl::OptionCategory MyToolCategory("My tool options");
 static llvm::cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static llvm::cl::extrahelp MoreHelp("\nMore help text...");
@@ -47,6 +48,8 @@ std::string PositMathFunc = "p32_";
 std::string PositTY = "posit32_t ";
 std::string PositDtoP = "convertDoubleToP32 ";
 std::string PositPtoD = "convertP32ToDouble ";
+std::string PositPtoI32 = "p32_to_i32 ";
+std::string PositPtoI64 = "p32_to_i64 ";
 std::string FloatingType = "double";
 std::stringstream SSBefore;
 //track temp variables
@@ -55,9 +58,11 @@ unsigned tmpCount = 0;
 std::set<const Stmt *> ForceBracesStmts;
 std::map<const IfStmt*, SourceLocation> BinIfLoc; 
 std::map<const BinaryOperator*, std::string> BinOp_Temp; 
+std::map<const UnaryOperator*, std::string> UOp_Temp; 
 std::map<const BinaryOperator*, SourceLocation> BinLoc_Temp; 
 std::map<const BinaryOperator*, const CallExpr*> BinParentCE; 
 std::map<const BinaryOperator*, const Stmt*> BinParentST; 
+std::map<const BinaryOperator*, const BinaryOperator*> BinParentBC; 
 std::map<const BinaryOperator*, const BinaryOperator*> BinParentBO; 
 std::map<const BinaryOperator*, const VarDecl*> BinParentVD; 
 std::stack<const BinaryOperator*> BOStack; 
@@ -266,6 +271,9 @@ public:
 			case BO_EQ:
 				funcName = "p32_eq";
 				break;
+			case BO_NE:
+				funcName = "!p32_eq";
+				break;
 			case BO_LE:
 				funcName = "p32_le";
 				break;
@@ -337,7 +345,7 @@ public:
 
 	std::string handleMathFunc(const std::string funcName){
 #if 1
-		if(funcName == "sqrt" || funcName == "cos" ||
+		if(funcName == "sqrt" || funcName == "cos" || funcName == "acos" ||
 			funcName == "sin" || funcName == "tan" ||
 			funcName == "cosec" || funcName == "strtod")
 				return PositMathFunc+funcName; 
@@ -346,7 +354,7 @@ public:
 				return funcName; 
 	}
 //	x = y * 0.3 => t1 = convertdoubletoposit(0.3)
-	void ReplaceBOLiteralWithPosit(const BinaryOperator *BO, SourceLocation StartLoc, std::string lhs, std::string rhs){
+	void ReplaceBOLiteralWithPosit(SourceLocation StartLoc, std::string lhs, std::string rhs){
 		if(!StartLoc.isValid())
 			return;
 		SourceManager &SM = Rewrite.getSourceMgr();
@@ -378,7 +386,7 @@ public:
 			case::UO_PostDec:{
 				std::string func = getPositFuncName(BO_Sub);
 				Rewrite.InsertText(BOStartLoc, 
-					PositTY+Op1+" = "+func+"("+Op1+","+Op2+");\n", true, true);
+					PositTY+temp+" = "+func+"("+Op1+","+Op2+");\n", true, true);
 				//removeLine(BO->getSourceRange().getBegin(), BO->getSourceRange().getEnd());
 				break;
 			}
@@ -391,9 +399,7 @@ public:
 	// x = *0.4*y*z => t1 = posit_mul(y,z);
 	void ReplaceBOWithPosit(const BinaryOperator *BO, SourceLocation BOStartLoc, 
 														std::string Op1, std::string Op2){
-		llvm::errs()<<"*******\n";	
-		BO->dump();
-		llvm::errs()<<"*******\n";	
+		llvm::errs()<<"ReplaceBOWithPosit*******\n";	
 		unsigned Opcode = BO->getOpcode();
 		std::string func = getPositFuncName(Opcode);
 		SourceManager &SM = Rewrite.getSourceMgr();
@@ -409,34 +415,34 @@ public:
 			case::BO_Mul:
 			case::BO_Div:
 			case::BO_Sub:{	
-				llvm::errs()<<"Bo Add\n";
+				llvm::errs()<<"ReplaceBOWithPosit Bo Add\n";
 				Rewrite.InsertText(BOStartLoc, 
 					PositTY+temp+" = "+func+"("+Op1+","+Op2+");\n", true, true);
 				BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, temp));	
 				break;
 			}
 			case::BO_Assign:{
-				llvm::errs()<<"Bo Assign\n";
+				llvm::errs()<<"ReplaceBOWithPosit Bo Assign\n";
 				Rewrite.InsertText(BOStartLoc,
 					Op1+" = "+Op2+";\n", true, true);
 				removeLineBO(BO->getSourceRange().getBegin());
 				BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
-				break;
+				return;
 			}
 			case::BO_DivAssign:
 			case::BO_MulAssign:
 			case::BO_AddAssign:
 			case::BO_SubAssign:{
-				llvm::errs()<<"Bo AddAssign\n";
+				llvm::errs()<<"ReplaceBOWithPosit Bo AddAssign\n";
 				Rewrite.InsertText(BOStartLoc, 
 					Op1+" = "+func+"("+Op1+","+Op2+");\n", true, true);
 				removeLineBO(BOStartLoc);
 				BinOp_Temp.insert(std::pair<const BinaryOperator*, std::string>(BO, Op1));	
-				llvm::errs()<<"BO_AddAssign Op1:"<<Op1<<" Op2:"<<Op2<<"\n";
-				break;
+				llvm::errs()<<"ReplaceBOWithPosit BO_AddAssign Op1:"<<Op1<<" Op2:"<<Op2<<"\n";
+				return;
 			}
 			default:
-				llvm::errs()<<"Error!!! Operand is unknown\n\n";
+				llvm::errs()<<"ReplaceBOWithPosit: Error!!! Operand is unknown\n\n";
 		}
 			//update parent
 
@@ -466,32 +472,66 @@ public:
 			else
 				Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
 		}
+		else if(BinParentBC.count(BO) != 0){
+			//handle x*y > y*z
+			llvm::errs()<<"ReplaceBOWithPosit: parent is BCond";
+			const BinaryOperator *ParentBP = BinParentBC.at(BO);
+			std::string tmp = handleCondition(ParentBP->getSourceRange().getBegin(), ParentBP);
+					if(tmp.size()>0){
+						std::string temp, lhs, rhs;
+						temp = getTempDest();
+						Rewrite.InsertText(StartLoc,
+                  "bool "+temp +" = "+Op1+";\n", true, true);   
+						lhs = getTempDest();
+						rhs = " = "+PositDtoP+"("+temp+");";
+						ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
+					}
+					Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), tmp);
+		}
 		else if(BinParentBO.count(BO) != 0){
 			llvm::errs()<<"ReplaceBOWithPosit: parent is BO\n";
-			Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
+			const BinaryOperator *ParentBP = BinParentBO.at(BO);
+			//handle cast to int
+			if(ParentBP->getType()->isIntegerType()){
+				llvm::errs()<<"ReplaceBOWithPosit rhs:\n";
+				llvm::errs()<<"ReplaceBOWithPosit bo:\n";
+				if(ParentBP->getRHS()->IgnoreImpCasts() == BO){
+					llvm::errs()<<"ReplaceBOWithPosit: handle cast to int\n";
+					std::string convert = PositPtoI32+"(" + temp +");";
+					std::string tmp;
+					tmp = getTempDest();
+					Rewrite.InsertText(ParentBP->getSourceRange().getBegin(), 
+									"int "+tmp +" = "+convert+"\n", true, true);		
+				
+					Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), tmp);
+				}
+				else
+					Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
+			}
+			else
+				Rewrite.ReplaceText(SourceRange(StartLoc, EndLoc), temp);
 		}
 		else if(BinParentVD.count(BO) != 0){
 			llvm::errs()<<"ReplaceBOWithPosit: parent is VD\n";
 			const VarDecl* VD = BinParentVD.at(BO);
 			ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), VD->getNameAsString()+" = "+temp+";");
 		}
-/*
-		else if(BinParentIfST.count(BO) != 0){
+		else if(BinParentST.count(BO) != 0){
 			llvm::errs()<<"ReplaceBOWithPosit: parent is ST\n";
 			Rewrite.ReplaceText(SourceRange(BO->getSourceRange().getBegin(), 	
 						BO->getSourceRange().getEnd()), temp);
 		}
-*/
 		else{
 			llvm::errs()<<"ReplaceBOWithPosit: Error!!! no parent\n";
 		}	
 	}
 
 	void handleBinOp(ASTContext &Context){
-		llvm::errs()<<"foooooooooooo********\n"<<"BOStack.size():"<<BOStack.size()<<"\n";
+		llvm::errs()<<"handleBinOp********\n"<<"BOStack.size():"<<BOStack.size()<<"\n";
 		const BinaryOperator *BO;
 		while(BOStack.size() > 0){
 			BO = BOStack.top();
+			BO->dump();
 
 			BOStack.pop();
 			//check if this binaryoperator is processed
@@ -515,14 +555,15 @@ public:
 */
 			unsigned lineNo = getLineNo(StartLoc);
 			llvm::errs()<<"handleBinOp lineNo:"<<lineNo<<"\n";
-			std::string Op1Str = handleOperand(BO, StartLoc, Op1);
-			std::string Op2Str = handleOperand(BO, StartLoc, Op2);
+			std::string Op1Str = handleOperand(StartLoc, Op1);
+			std::string Op2Str = handleOperand(StartLoc, Op2);
 
-			llvm::errs()<<"Op1:"<<Op1Str<<"\n";
-			llvm::errs()<<"Op2:"<<Op2Str<<"\n";
+			llvm::errs()<<"handleBinOp Op1:"<<Op1Str<<"\n";
+			llvm::errs()<<"handleBinOp Op2:"<<Op2Str<<"\n";
 
 			ReplaceBOWithPosit(BO, StartLoc, Op1Str, Op2Str);
 		}		
+		llvm::errs()<<"handleBinOp end********\n\n";
 	}
 	bool isPointerToFloatingType(const Type *Ty){
 		QualType QT = Ty->getPointeeType();
@@ -547,20 +588,15 @@ public:
 	}
 
 	Expr* removeParen(Expr *Op){
-		while (isa<ParenExpr>(Op)) {
-			ParenExpr *PE = llvm::dyn_cast<ParenExpr>(Op);
-			Op = PE->getSubExpr();
-  	}
-		while (isa<ImplicitCastExpr>(Op)) {
-			ImplicitCastExpr *PE = llvm::dyn_cast<ImplicitCastExpr>(Op);
-			Op = PE->getSubExpr();
-		}
-		while (isa<UnaryOperator>(Op)) {
-			UnaryOperator *UE = llvm::dyn_cast<UnaryOperator>(Op);
-			if(!isArithmetic(UE->getOpcode()))
-				Op = UE->getSubExpr();
-			else
-				break;
+		while (isa<ImplicitCastExpr>(Op) || isa<ParenExpr>(Op)) {
+			if(isa<ImplicitCastExpr>(Op)){
+				ImplicitCastExpr *PE = llvm::dyn_cast<ImplicitCastExpr>(Op);
+				Op = PE->getSubExpr();
+			}
+			if(isa<ParenExpr>(Op)){
+				ParenExpr *PE = llvm::dyn_cast<ParenExpr>(Op);
+				Op = PE->getSubExpr();
+			}
 		}
 		return Op;
 	}
@@ -634,98 +670,191 @@ std:: string handleCCast(SourceLocation StartLoc, const CStyleCastExpr *CS, std:
 	return temp;
 }
 
-void handleCondition(SourceLocation StartLoc, const BinaryOperator *BinOp){
+std::string handleCCondition(SourceLocation StartLoc, const ConditionalOperator *CO, const BinaryOperator *BinOp){
+	llvm::errs()<<"handleCCondition....\n";
 	const Type *Ty = BinOp->getLHS()->getType().getTypePtr();
-	if(isPointerToFloatingType(Ty)){
+	SourceManager &SM = Rewrite.getSourceMgr();
+	if(isPointerToFloatingType(Ty))
 		if(Ty->isPointerType())
-			return;
+			return nullptr;
 		
-		std::string func = getPositBinOp(BinOp->getOpcode());
-		std::string Op1 = handleOperand(BinOp, StartLoc, BinOp->getLHS());
-		std::string Op2 = handleOperand(BinOp, StartLoc, BinOp->getRHS());
-		llvm::errs()<<"bin if Op1:"<<Op1<<" Op2:"<<Op2<<"\n";
-		Rewrite.ReplaceText(BinOp->getSourceRange(), func+"("+Op1+","+Op2+")");
+	std::string func = getPositBinOp(BinOp->getOpcode());
+	std::string Op1 = handleOperand(StartLoc, BinOp->getLHS());
+	std::string Op2 = handleOperand(StartLoc, BinOp->getRHS());
+	llvm::errs()<<"bin if Op1:"<<Op1<<"\nbin if Op2:"<<Op2<<"\n";
+			
+	std::string Op, Opp;
+	std::string Op11 = handleOperand(StartLoc, CO->getLHS());
+	std::string Op12 = handleOperand(StartLoc, CO->getRHS());
+	Op = func+"("+Op1+","+Op2+")"+"?"+Op11+":"+Op12+";";
+/*
+	int RangeSize2 = Rewrite.getRangeSize(BinOp->getSourceRange());
+	const char *StartBuf1 = SM.getCharacterData(BinOp->getSourceRange().getBegin());
+	Opp.assign(StartBuf, RangeSize2);
+	size_t pos = Op.find(Opp);
+	llvm::errs()<<"pos:"<<pos<<"\n";
+	llvm::errs()<<"Opp:"<<Opp<<"\n";
+	if (pos != std::string::npos){
+		Op.replace(pos, Opp.size(), func+"("+Op1+","+Op2+")"); 
 	}
+*/
+	llvm::errs()<<"Op:"<<Op<<"\n";
+	return Op;
 }
 
-void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl *VD, 
-										const BinaryOperator *BA, const Stmt *ST, const IfStmt *IfST, 
-										const WhileStmt *WhileST, const ASTContext *Context) {
+std::string handleCondition(SourceLocation StartLoc, const BinaryOperator *BinOp){
+	llvm::errs()<<"handleCondition....\n";
+	const Type *Ty = BinOp->getLHS()->getType().getTypePtr();
+	SourceManager &SM = Rewrite.getSourceMgr();
+
+	if(isPointerToFloatingType(Ty)){
+		if(Ty->isPointerType())
+			return "";
+		
+		SmallVector<const BinaryOperator*, 8>::iterator it;
+		it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BinOp);
+		if(it != ProcessedBO.end())
+			return "";
+			
+		ProcessedBO.push_back(BinOp);
+		std::string func = getPositBinOp(BinOp->getOpcode());
+		std::string Op1 = handleOperand(StartLoc, BinOp->getLHS());
+		std::string Op2 = handleOperand(StartLoc, BinOp->getRHS());
+		llvm::errs()<<"handleCondition bin if Op1:"<<Op1<<"\n bin if Op2:"<<Op2<<"\n";
+
+		std::string op = func+"("+Op1+","+Op2+")";
+		Rewrite.ReplaceText(BinOp->getSourceRange(), op);
+		return op;
+	}
+	else
+		return "";
+}
+
+std::string handleCallArgs(const CallExpr *CE){
+	const FunctionDecl *Func = CE->getDirectCallee();
+	std::string funcName = handleMathFunc(Func->getNameInfo().getAsString());
+	std::string Op1 = funcName+"(";
+	for(int i=0, j=CE->getNumArgs(); i<j; i++){
+		auto Arg = dyn_cast<BinaryOperator>(CE->getArg(i));
+		if(Arg && isPointerToFloatingType(Arg->getType().getTypePtr())){
+			std::string temp;
+			temp = BinOp_Temp.at(Arg);
+			Op1 += temp;
+		}
+		else if(const CallExpr *CCE = dyn_cast<CallExpr>(CE->getArg(i))){
+			Op1 += handleCallArgs(CCE);
+		}
+		else{
+			std::string ArgName;
+			llvm::raw_string_ostream s(ArgName);
+			CE->getArg(i)->printPretty(s, NULL, PrintingPolicy(LangOptions()));
+			llvm::errs()<<"ArgName:"<<s.str()<<"\n";
+			Op1 += s.str();
+		}
+		if(i+1 != j)
+			Op1 += ",";
+	}
+	Op1 += ")";
+	return Op1;
+}
+
+SourceLocation getParentLoc(const MatchFinder::MatchResult &Result, const BinaryOperator *BO){
+		const ASTContext *Context = Result.Context;	
+		const CallExpr *CE = Result.Nodes.getNodeAs<clang::CallExpr>("callbo");
+		const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo");
+		const Stmt *ST = Result.Nodes.getNodeAs<clang::ReturnStmt>("returnbo");
+		auto IfST = Result.Nodes.getNodeAs<IfStmt>("ifstmtbo");
+		auto WhileST = Result.Nodes.getNodeAs<WhileStmt>("whilebo");
+		auto BA = Result.Nodes.getNodeAs<clang::BinaryOperator>("bobo");
+		auto BC = Result.Nodes.getNodeAs<clang::BinaryOperator>("cbobo");
+		const BinaryOperator *BCond = Result.Nodes.getNodeAs<clang::BinaryOperator>("condbo");
 		SourceManager &SM = Rewrite.getSourceMgr();
+		SourceLocation StartLoc;	
 		if(CE){
 			llvm::errs()<<"CE loc\n";
-			SourceLocation StartLoc = CE->getSourceRange().getBegin();
+			StartLoc = CE->getSourceRange().getBegin();
 			if (StartLoc.isMacroID()) {
 				StartLoc = SM.getFileLoc(StartLoc);
 			}
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
 		}
 		else if(VD){
 			llvm::errs()<<"VD loc\n";
-			SourceLocation StartLoc = VD->getSourceRange().getBegin();
+			StartLoc = VD->getSourceRange().getBegin();
 			if (StartLoc.isMacroID()) {
 				StartLoc = SM.getFileLoc(StartLoc);
 			}
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
 		}
-		else if(BA){
-			llvm::errs()<<"BA loc\n";
-			SourceLocation StartLoc = BA->getSourceRange().getBegin();
+		else if(BC){
+			llvm::errs()<<"BC loc\n";
+			StartLoc = BC->getSourceRange().getBegin();
 			if (StartLoc.isMacroID()) {
     		StartLoc = SM.getFileLoc(StartLoc); 
 			}
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+		}
+		else if(BA){
+			llvm::errs()<<"BA loc\n";
+			StartLoc = BA->getSourceRange().getBegin();
+			if (StartLoc.isMacroID()) {
+    		StartLoc = SM.getFileLoc(StartLoc); 
+			}
 			BinParentBO.insert(std::pair<const BinaryOperator*, const BinaryOperator*>(BO, BA));	
 		}
 		else if(WhileST){
 			llvm::errs()<<"While ST loc\n";
-			SourceLocation StartLoc = findRParenLoc(WhileST, SM, Context);
+			StartLoc = WhileST->getSourceRange().getBegin();
 			BinParentST.insert(std::pair<const BinaryOperator*, const WhileStmt*>(BO, WhileST));	
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, WhileST->getSourceRange().getBegin()));	
 		}
 		else if(IfST){
 			llvm::errs()<<"If ST loc\n";
-			SourceLocation StartLoc = findRParenLoc(IfST, SM, Context);
+			StartLoc = IfST->getSourceRange().getBegin();
 			BinParentST.insert(std::pair<const BinaryOperator*, const IfStmt*>(BO, IfST));	
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, IfST->getSourceRange().getBegin()));	
+		}
+		else if(BCond){
+			llvm::errs()<<"If BCond loc\n";
+			StartLoc = BCond->getSourceRange().getBegin();
+			//BinParentBC.insert(std::pair<const BinaryOperator*, const BinaryOperator*>(BO,  BCond));	
 		}
 		else if(ST){
 			llvm::errs()<<"ST loc\n";
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, ST->getSourceRange().getBegin()));	
+			StartLoc = ST->getSourceRange().getBegin();
 		}
 		else
 		{
 			llvm::errs()<<"no loc\n";
-			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, BO->getSourceRange().getBegin()));	
+			StartLoc = BO->getSourceRange().getBegin();
 		}
-			//check if this binaryoperator is processed
-			//check if LHS is processed, get its temp variable
-			//check if RHS is processed, get its temp variable
-			//create new varible, if this BO doesnt have a VD as its LHS
-			//push this in map
-		SmallVector<const BinaryOperator*, 8>::iterator it;
-		it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
-		if(it != ProcessedBO.end())
-			return;
-			
-		ProcessedBO.push_back(BO);
-		BOStack.push(BO);
+		return StartLoc;
 	}
-	std::string handleOperand(const BinaryOperator *BO, SourceLocation StartLoc, Expr *Op){
+
+	std::string handleOperand(SourceLocation StartLoc, Expr *Op){
+			llvm::errs()<<"handleOperand:..\n";
 			std::string Op1, lhs, rhs;
+			SourceManager &SM = Rewrite.getSourceMgr();
 			if(FloatingLiteral *FL_lhs = dyn_cast<FloatingLiteral>(Op)){
 				llvm::errs()<<"Op is floatliteral\n";
 				lhs = getTempDest();
 				rhs = convertFloatToPosit(FL_lhs);
-				ReplaceBOLiteralWithPosit(BO, StartLoc, lhs, " = "+rhs);
+				ReplaceBOLiteralWithPosit(StartLoc, lhs, " = "+rhs);
+				Op1 = lhs;
+			}
+			else if(IntegerLiteral *IL_lhs = dyn_cast<IntegerLiteral>(Op)){
+				llvm::errs()<<"Op is intliteral\n";
+				lhs = getTempDest();
+				rhs = convertIntToPosit(IL_lhs);
+				ReplaceBOLiteralWithPosit(StartLoc, lhs, " = "+rhs);
 				Op1 = lhs;
 			}
 			else if(UnaryOperator *U_lhs = dyn_cast<UnaryOperator>(Op)){
-				llvm::errs()<<"Op is unaryOperator\n";
+				if(UOp_Temp.count(U_lhs) != 0){
+					Op1 = UOp_Temp.at(U_lhs);
+					llvm::errs()<<"Op is found:op:"<<Op1<<"\n";
+				}
+				else{
+				llvm::errs()<<"handleOperand: Op is unaryOperator\n";
 				lhs = getTempDest();
 				rhs = " = "+PositDtoP+"(1);";
-				ReplaceBOLiteralWithPosit(BO, StartLoc, lhs, rhs);
-				std::string func = getPositFuncName(BO->getOpcode());
+				ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
+
 				const Type *Ty = U_lhs->getType().getTypePtr();
 				QualType QT = Ty->getPointeeType();
 				std::string indirect="";
@@ -734,12 +863,24 @@ void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl
 					QT = Ty->getPointeeType();
 					indirect += "*";
 				}
-				std::string opName;
-      	llvm::raw_string_ostream stream(opName);
-      	U_lhs->getSubExpr()->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
-      	stream.flush();
-				std::string tmp = ReplaceUOWithPosit(U_lhs, StartLoc, lhs, indirect+opName);
+				std::string opName, tmp;
+      	//llvm::raw_string_ostream stream(opName);
+      	//U_lhs->getSubExpr()->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	//stream.flush();
+				int RangeSize = Rewrite.getRangeSize(U_lhs->getSubExpr()->getSourceRange());
+				const char *StartBuf = SM.getCharacterData(U_lhs->getSubExpr()->getSourceRange().getBegin());
+				opName.assign(StartBuf, RangeSize);
+				if(isa<FloatingLiteral>(U_lhs->getSubExpr())){
+				tmp = getTempDest();
+				rhs = " = "+PositDtoP+"("+opName+")";
+				Rewrite.InsertText(StartLoc, 
+					PositTY+tmp +rhs+";\n", true, true);		
+				tmp = ReplaceUOWithPosit(U_lhs, StartLoc, lhs, tmp);
+				}
+				else
+				tmp = ReplaceUOWithPosit(U_lhs, StartLoc, lhs, opName);
 				Op1 = tmp;
+				}
 			}
 			else if(BinaryOperator *BO_lhs = dyn_cast<BinaryOperator>(Op)){
 				llvm::errs()<<"Op is binaryOperator\n";
@@ -747,12 +888,34 @@ void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl
 					Op1 = BinOp_Temp.at(BO_lhs);
 					llvm::errs()<<"Op is found:op:"<<Op1<<"\n";
 				}
+				else{
+					Op1 = handleCondition(StartLoc, BO_lhs);
+					if(Op1.size()>0){
+						std::string temp;
+						temp = getTempDest();
+						Rewrite.InsertText(StartLoc,
+                  "bool "+temp +" = "+Op1+";\n", true, true);   
+						lhs = getTempDest();
+						rhs = " = "+PositDtoP+"("+temp+");";
+						ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
+						Op1 = lhs;
+					}
+					else
+						llvm::errs()<<"Error binaryOperator Op is not found"<<"\n";
+				}
 			}
 			else if(ImplicitCastExpr *ASE_lhs = dyn_cast<ImplicitCastExpr>(Op)){
 				llvm::errs()<<"Op is implicitcast\n";
-      	llvm::raw_string_ostream stream(Op1);
-      	ASE_lhs->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
-      	stream.flush();
+      	llvm::raw_string_ostream s(Op1);
+      	ASE_lhs->printPretty(s, NULL, PrintingPolicy(LangOptions()));
+				size_t pos = 0;
+				pos = s.str().find(FloatingType);
+				llvm::errs()<<"pos:"<<pos<<"\n";
+				std::string val = s.str();
+				if (pos != std::string::npos){
+					s.str().replace(pos, FloatingType.size(), "posit32_t"); 
+				}
+      	s.flush();
 				
 				//handle inttoD
 				const Expr *SubExpr = ASE_lhs->getSubExpr();
@@ -760,13 +923,19 @@ void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl
 				if(SubTy->isIntegerType()){
 					lhs = getTempDest();
 					rhs = " = "+PositDtoP+"(" + Op1+");";
-					ReplaceBOLiteralWithPosit(BO, StartLoc, lhs, rhs);
+					ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
         	Op1 = lhs;
 				}
 			}
 			else if(DeclRefExpr *DEL = dyn_cast<DeclRefExpr>(Op)){
 				llvm::errs()<<"Op is decl\n";
 				Op1 = DEL->getDecl()->getName();
+				if(DEL->getType()->isIntegerType()){
+					lhs = getTempDest();
+					rhs = " = "+PositDtoP+"(" + Op1+");";
+					ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
+        	Op1 = lhs;
+				}
 			}
 			else if(const CStyleCastExpr *CCE = dyn_cast<CStyleCastExpr>(Op)){
 				llvm::errs()<<"Op is cast\n";
@@ -778,34 +947,24 @@ void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl
       	std::cout<<"subExpr:"<<subExpr<<"\n";
       	std::string temp = getTempDest();
 				std::string rhs = " = "+PositDtoP+"(" + subExpr+");";
-				ReplaceBOLiteralWithPosit(BO, StartLoc, temp, rhs);
+				ReplaceBOLiteralWithPosit(StartLoc, temp, rhs);
 				Op1 = temp;
 			}
 			else if(const CallExpr *CE = dyn_cast<CallExpr>(Op)){
 				llvm::errs()<<"Op is call expr";
-				const FunctionDecl *Func = CE->getDirectCallee();
-				std::string funcName = handleMathFunc(Func->getNameInfo().getAsString());
-				Op1 = funcName+"(";
-				for(int i=0, j=CE->getNumArgs(); i<j; i++){
-					auto Arg = dyn_cast<BinaryOperator>(CE->getArg(i));
-					if(Arg && isPointerToFloatingType(Arg->getType().getTypePtr())){
-						std::string temp;
-						temp = BinOp_Temp.at(Arg);
-						Op1 += temp;
-					}
-					else{
-        		std::string ArgName;
-        		llvm::raw_string_ostream s(ArgName);
-        		CE->getArg(i)->printPretty(s, NULL, PrintingPolicy(LangOptions()));
-						llvm::errs()<<"ArgName:"<<s.str()<<"\n";
-						Op1 += s.str();
-					}
-    		}
-				Op1 += ")";
+				Op1 = handleCallArgs(CE);
+			}
+			else if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(Op)) {
+				//SourceLocation StartLoc = S->getSourceRange().getBegin();
+				llvm::errs()<<"Op is conditional operator\n";
+				std::string tmp = handleCCondition(StartLoc, CO, dyn_cast<BinaryOperator>(CO->getCond()));
+				lhs = getTempDest();
+				rhs = " = "+ tmp;
+				ReplaceBOLiteralWithPosit(StartLoc, lhs, rhs);
+        Op1 = lhs;
 			}
 			else{
 				llvm::errs()<<"Op Not found, returning op as string.......\n\n";
-        std::string TypeS;
         llvm::raw_string_ostream s(Op1);
         Op->printPretty(s, 0, PrintingPolicy(LangOptions()));
 				//Op could be cast => (double *) => replace with => (posit32_t)
@@ -813,10 +972,10 @@ void accumulateBinOp(const BinaryOperator *BO, const CallExpr *CE, const VarDecl
 				pos = s.str().find(FloatingType);
 				llvm::errs()<<"pos:"<<pos<<"\n";
 				std::string val = s.str();
-				if(pos != 0){
+				if (pos != std::string::npos){
 					s.str().replace(pos, FloatingType.size(), "posit32_t"); 
 				}
-				llvm::errs()<<"Op1:"<<Op1<<"\n";
+				llvm::errs()<<"Op Not found, returning op as string:"<<Op1<<"\n\n\n";
       	s.flush();
 			}
 		return Op1;
@@ -1025,20 +1184,34 @@ if (InitialLoc.isInvalid())
 			SourceLocation StartLoc = findRParenLoc(S, SM, Context);
 			if (StartLoc.isInvalid())
 				return;
-			llvm::errs()<<"found if***\n";
-			BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, S->getSourceRange().getBegin()));	
 			if (ForceBracesStmts.erase(S))
 				ForceBracesStmts.insert(S->getThen());
 			bool BracedIf = checkStmtWithLoc(Result, S->getThen(), StartLoc, S->getElseLoc());
 			const Stmt *Else = S->getElse();
-			if (Else && BracedIf)
+			if (Else && BracedIf){
 				ForceBracesStmts.insert(Else);
+				llvm::errs()<<"has else\n";
+			}
 			if (Else && !isa<IfStmt>(Else)) {
 			// Omit 'else if' statements here, they will be handled directly.	
 				checkStmt(Result, Else, S->getElseLoc());
 			}
+			if (Else && isa<IfStmt>(Else)){ 
+				llvm::errs()<<"has else with if\n";
+				const IfStmt *child = dyn_cast<IfStmt>(Else);
+				BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(child, S->getSourceRange().getBegin()));
+			}
+			BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, S->getSourceRange().getBegin()));
 		}
-		if (auto S = Result.Nodes.getNodeAs<WhileStmt>("ifcond")) {
+		if (auto S = Result.Nodes.getNodeAs<DoStmt>("docond")) {
+			llvm::errs()<<"do while condition......\n";
+			if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("cond")) {
+				llvm::errs()<<"while condition......\n";
+				SourceLocation StartLoc = S->getSourceRange().getBegin();
+				handleCondition(StartLoc, BinOp);
+			}
+		}
+		if (auto S = Result.Nodes.getNodeAs<WhileStmt>("whilecond")) {
 			llvm::errs()<<"while condition......\n";
 			if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("cond")) {
 				llvm::errs()<<"while condition......\n";
@@ -1046,32 +1219,40 @@ if (InitialLoc.isInvalid())
 				handleCondition(StartLoc, BinOp);
 			}
 		}
-		if (auto S = Result.Nodes.getNodeAs<ConditionalOperator>("ifcond")) {
+		if (auto S = Result.Nodes.getNodeAs<ConditionalOperator>("c_cond")) {
 			llvm::errs()<<"conditional condition......\n";
 			if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("cond")) {
 				llvm::errs()<<"conditional condition......\n";
-				SourceLocation StartLoc = S->getSourceRange().getBegin();
+				SourceLocation StartLoc = getParentLoc(Result, nullptr);
 				handleCondition(StartLoc, BinOp);
 			}
 		}
-		if (auto S = Result.Nodes.getNodeAs<IfStmt>("ifcond")) {
-			llvm::errs()<<"if condition......\n";
-			if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("cond")) {
+		if (auto BinOp = Result.Nodes.getNodeAs<BinaryOperator>("ifcond")) {
+			llvm::errs()<<"ifcond......\n";
+			if (auto S = Result.Nodes.getNodeAs<BinaryOperator>("bineq")) {
+				llvm::errs()<<"parent is bineq......\n";
+				handleCondition(S->getSourceRange().getBegin(), BinOp);
+			}
+			if (auto S = Result.Nodes.getNodeAs<VarDecl>("vardecl")) {
+				llvm::errs()<<"parent is vardecl......\n";
+				handleCondition(S->getSourceRange().getBegin(), BinOp);
+			}
+			if (auto S = Result.Nodes.getNodeAs<ReturnStmt>("rtstmt")) {
+				llvm::errs()<<"parent is rtstmt......\n";
+				handleCondition(S->getSourceRange().getBegin(), BinOp);
+			}
+			if (auto S = Result.Nodes.getNodeAs<IfStmt>("ifstmt")) {
 				llvm::errs()<<"if condition......\n";
-				SourceLocation StartLoc = S->getSourceRange().getBegin();
-				handleCondition(StartLoc, BinOp);
+				if(BinIfLoc.count(S) != 0){
+					IfStartLoc = BinIfLoc.at(S);
+				}
+				handleCondition(IfStartLoc, BinOp);
 			}
 		}
 		if (auto S = Result.Nodes.getNodeAs<IfStmt>("curif")) {
 			llvm::errs()<<"matched if\n";
 			llvm::errs()<<"****\n";
-			auto topIf = Result.Nodes.getNodeAs<IfStmt>("topif");
-			auto itr = BinIfLoc.find(S); 
-     	if (itr != BinIfLoc.end()){
-          (*itr).second = topIf->getSourceRange().getBegin();
-     	}
-			else
-				BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, topIf->getSourceRange().getBegin()));	
+			//BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, S->getSourceRange().getBegin()));	
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("boassignvd")){
 			llvm::errs()<<"boassignvd\n";
@@ -1498,53 +1679,8 @@ if (InitialLoc.isInvalid())
 			insertHeader(FD->getSourceRange().getBegin());	
 			
 		}
-		if(const IfStmt *IFStmt = Result.Nodes.getNodeAs<clang::IfStmt>("ifelse")){
-			const Stmt *IF = Result.Nodes.getNodeAs<clang::Stmt>("else");
-			if(IF){
-		//		SourceLocation StartLoc = IF->getSourceRange().getBegin();
-		//		Rewrite.InsertText(StartLoc, 
-			//						"{\n", true, true);	//close if	
-				llvm::errs()<<"else start....\n";
-				SourceLocation StartLoc = IF->getSourceRange().getBegin();
-			SourceManager &SM = Rewrite.getSourceMgr();
-			const char *StartBuf = SM.getCharacterData(StartLoc);
-			unsigned StartOffset = 0;	
-			SourceLocation EndLoc = IF->getSourceRange().getEnd();
-			const char *EndBuf = SM.getCharacterData(EndLoc.getLocWithOffset(-1));
-			while (*StartBuf != 'e' ){
-    		StartBuf--;
-				StartOffset--;
-			}
-			std::string IndentStr = getStmtIndentString(IFStmt->getSourceRange().getBegin());
-			Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(StartOffset), 
-									"\n"+IndentStr+"{");		
-			Rewrite.InsertTextAfterToken(EndLoc.getLocWithOffset(1), 
-									"\n"+IndentStr+"}");		
-			}
-		}
-		if(const IfStmt *IFStmt = Result.Nodes.getNodeAs<clang::IfStmt>("ifthen")){
-			const Stmt *IF = Result.Nodes.getNodeAs<clang::Stmt>("then");
-			if(IF){
-				llvm::errs()<<"then start....\n";
-				SourceLocation StartLoc = IF->getSourceRange().getBegin();
-			SourceManager &SM = Rewrite.getSourceMgr();
-			const char *StartBuf = SM.getCharacterData(StartLoc);
-			unsigned StartOffset = 0;	
-			SourceLocation EndLoc = IF->getSourceRange().getEnd();
-			const char *EndBuf = SM.getCharacterData(EndLoc.getLocWithOffset(-1));
-			while (*StartBuf != ')' ){
-    		StartBuf--;
-				StartOffset--;
-			}
-			std::string IndentStr = getStmtIndentString(IFStmt->getSourceRange().getBegin());
-			Rewrite.InsertTextAfterToken(StartLoc.getLocWithOffset(StartOffset), 
-									"\n"+IndentStr+"{");		
-			Rewrite.InsertTextAfterToken(EndLoc.getLocWithOffset(1), 
-									"\n"+IndentStr+"}");		
-			}
-		}
 		if(const CStyleCastExpr *CS = Result.Nodes.getNodeAs<clang::CStyleCastExpr>("ccast")){
-			llvm::errs()<<"*****ccast..";
+			llvm::errs()<<"*****ccast..\n";
 			if(!isPointerToFloatingType(CS->getTypeAsWritten().getTypePtr()))
 				return;
 			const CallExpr *CE = Result.Nodes.getNodeAs<clang::CallExpr>("printfarg");
@@ -1554,7 +1690,6 @@ if (InitialLoc.isInvalid())
 			const Expr *SubExpr = CS->getSubExpr();
 			const Type *SubTy =  SubExpr->getType().getTypePtr();
 			llvm::errs()<<"ccast ....\n";
-			SubTy->dump();
 			const char *StartBuf = SM.getCharacterData(CS->getSourceRange().getBegin());
 			if(CE){
 			for(int i=0, j=CE->getNumArgs(); i<j; i++)
@@ -1573,7 +1708,6 @@ if (InitialLoc.isInvalid())
 	
 				llvm::errs()<<"arg:"<<s.str()<<"\n";
 				llvm::errs()<<"type:\n";
-				CE->getArg(i)->getType().getTypePtr()->dump();
 				if(isPointerToFloatingType(CE->getArg(i)->getType().getTypePtr())){
 					llvm::errs()<<"printf....\n";
 						llvm::errs()<<"arg is cast....\n";
@@ -1614,7 +1748,7 @@ if (InitialLoc.isInvalid())
 					if(SubTy->isIntegerType()){
 						lhs = getTempDest();
 						rhs = " = "+PositDtoP+"(" + Op+");";
-						ReplaceBOLiteralWithPosit(nullptr, BA->getSourceRange().getBegin(), lhs, rhs);
+						ReplaceBOLiteralWithPosit(BA->getSourceRange().getBegin(), lhs, rhs);
 						Rewrite.ReplaceText(SourceRange(CS->getSourceRange().getBegin(), CS->getSourceRange().getEnd()), lhs);
 					}
 				}
@@ -1633,10 +1767,8 @@ if (InitialLoc.isInvalid())
 	
 				llvm::errs()<<"arg:"<<s.str()<<"\n";
 				llvm::errs()<<"type:\n";
-				CE->getArg(i)->getType().getTypePtr()->dump();
 				if(isPointerToFloatingType(CE->getArg(i)->getType().getTypePtr())){
 					llvm::errs()<<"printf....\n";
-					CE->getArg(i)->dump();
 					llvm::errs()<<"printf after ....\n";
 			SmallVector<const Expr*, 8>::iterator it;
 			it = std::find(ProcessedExpr.begin(), ProcessedExpr.end(), CE->getArg(i));		
@@ -1679,41 +1811,145 @@ if (InitialLoc.isInvalid())
 			BinParentCE.insert(std::pair<const BinaryOperator*, const CallExpr*>(BO, CE));	
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("boassign")){
+			llvm::errs()<<"boassign\n";
 			const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("binfloat");
 			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("binint");
 			if(FL != NULL){
 				std::string positLiteral = convertFloatToPosit(FL);
-				Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), BO->getRHS()->getSourceRange().getEnd()), positLiteral);
+				Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), 
+															BO->getRHS()->getSourceRange().getEnd()), positLiteral);
 			}
 			if(IL != NULL){
 				std::string positLiteral = convertIntToPosit(IL);
-				Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), BO->getRHS()->getSourceRange().getEnd()), positLiteral);
+				Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), 
+															BO->getRHS()->getSourceRange().getEnd()), positLiteral);
 			}
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_be1")){
 
 			llvm::errs()<<"fadd_be1 ...\n";
-  		const ASTContext *Context = Result.Context;	
-			accumulateBinOp(BO, nullptr, nullptr, nullptr, nullptr, nullptr,nullptr, Context);
+			SourceLocation StartLoc = getParentLoc(Result, BO);
+			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+			
+			ProcessedBO.push_back(BO);
+			BOStack.push(BO);
 		}
-		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_unary")){
-			llvm::errs()<<"fadd_unary ...\n";
-  		const ASTContext *Context = Result.Context;	
-			accumulateBinOp(BO, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, Context);
-		}
-		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_comp")){
-			llvm::errs()<<"fadd_comp ...\n";
-  		const ASTContext *Context = Result.Context;	
-			accumulateBinOp(BO, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, Context);
-		}
-		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_be2")){
-			llvm::errs()<<"fadd_be2 ...\n";
-			BO->dump();
-  		const ASTContext *Context = Result.Context;	
+		if(const UnaryOperator *U_lhs = Result.Nodes.getNodeAs<clang::UnaryOperator>("unaryOp")){
+				llvm::errs()<<"unaryOp: Op is unaryOperator\n";
 			const CallExpr *CE = Result.Nodes.getNodeAs<clang::CallExpr>("callbo");
 			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo");
 			const BinaryOperator *BA = Result.Nodes.getNodeAs<clang::BinaryOperator>("bobo");
 			const Stmt *ST = Result.Nodes.getNodeAs<clang::ReturnStmt>("returnbo");
+			auto IfST = Result.Nodes.getNodeAs<IfStmt>("ifstmtbo");
+			auto WhileST = Result.Nodes.getNodeAs<WhileStmt>("whilebo");
+			llvm::errs()<<"fadd_be3 ...\n";
+			SourceLocation StartLoc, EndLoc;	
+		if(CE){
+			llvm::errs()<<"CE loc\n";
+			StartLoc = CE->getSourceRange().getBegin();
+			if (StartLoc.isMacroID()) {
+				StartLoc = SM.getFileLoc(StartLoc);
+			}
+		}
+		else if(VD){
+			llvm::errs()<<"VD loc\n";
+			StartLoc = VD->getSourceRange().getBegin();
+			if (StartLoc.isMacroID()) {
+				StartLoc = SM.getFileLoc(StartLoc);
+			}
+		}
+		else if(BA){
+			llvm::errs()<<"BA loc\n";
+			StartLoc = BA->getSourceRange().getBegin();
+			EndLoc = BA->getSourceRange().getEnd();
+			if (StartLoc.isMacroID()) {
+    		StartLoc = SM.getFileLoc(StartLoc); 
+			}
+		}
+		else if(WhileST){
+			llvm::errs()<<"While ST loc\n";
+			StartLoc = WhileST->getSourceRange().getBegin();
+		}
+		else if(IfST){
+			llvm::errs()<<"If ST loc\n";
+			StartLoc = IfST->getSourceRange().getBegin();
+		}
+		else if(ST){
+			llvm::errs()<<"ST loc\n";
+			StartLoc = ST->getSourceRange().getBegin();
+		}
+		else
+		{
+			llvm::errs()<<"no loc\n";
+		}
+
+
+			std::string lhs, rhs;	
+				llvm::errs()<<"handleOperand: Op is unaryOperator\n";
+				lhs = getTempDest();
+				rhs = " = "+PositDtoP+"(1);";
+				Rewrite.InsertText(StartLoc, 
+								PositTY+lhs +rhs+"\n", true, true);		
+
+				const Type *Ty = U_lhs->getType().getTypePtr();
+				QualType QT = Ty->getPointeeType();
+				std::string indirect="";
+				while (!QT.isNull()) {
+					Ty = QT.getTypePtr();
+					QT = Ty->getPointeeType();
+					indirect += "*";
+				}
+				std::string opName, tmp;
+      	//llvm::raw_string_ostream stream(opName);
+      	//U_lhs->getSubExpr()->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
+      	//stream.flush();
+				int RangeSize = Rewrite.getRangeSize(U_lhs->getSubExpr()->getSourceRange());
+				const char *StartBuf = SM.getCharacterData(U_lhs->getSubExpr()->getSourceRange().getBegin());
+				opName.assign(StartBuf, RangeSize);
+				if(isa<FloatingLiteral>(U_lhs->getSubExpr())){
+				tmp = getTempDest();
+				rhs = " = "+PositDtoP+"("+opName+")";
+		Rewrite.InsertText(StartLoc, 
+					PositTY+tmp +rhs+";\n", true, true);		
+				tmp = ReplaceUOWithPosit(U_lhs, StartLoc, lhs, tmp);
+				}
+				else
+				tmp = ReplaceUOWithPosit(U_lhs, StartLoc, lhs, opName);
+			//	Op1 = tmp;
+
+				UOp_Temp.insert(std::pair<const UnaryOperator*, std::string>(U_lhs, tmp));	
+				Rewrite.ReplaceText(U_lhs->getSourceRange(), tmp);
+		}
+		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_unary")){
+			llvm::errs()<<"fadd_unary ...\n";
+			SourceLocation StartLoc = getParentLoc(Result, BO);
+			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+			
+			ProcessedBO.push_back(BO);
+			BOStack.push(BO);
+		}
+		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_comp")){
+			llvm::errs()<<"fadd_comp ...\n";
+			SourceLocation StartLoc = getParentLoc(Result, BO);
+			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+			
+			ProcessedBO.push_back(BO);
+			BOStack.push(BO);
+		}
+		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_be2")){
+			llvm::errs()<<"fadd_be2 ...\n";
 			//We need to handle deepest node first in AST, but there is no way to traverse AST from down to up.
 			//We store all binaryoperator in stack.
 			//Handle all binop in stack in handleBinOp
@@ -1721,17 +1957,27 @@ if (InitialLoc.isInvalid())
 			//It would be better to store a object of binop and location of its parent node in stack, 
 			//for now we are storing it in a seperate map
 			//We also need to know source location range of parent node to remove it
-			accumulateBinOp(BO, CE, VD, BA, ST, nullptr, nullptr, Context);
+			SourceLocation StartLoc = getParentLoc(Result, BO);
+			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+			
+			ProcessedBO.push_back(BO);
+			BOStack.push(BO);
 		}
 		if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("fadd_be3")){
-  		const ASTContext *Context = Result.Context;	
-			const CallExpr *CE = Result.Nodes.getNodeAs<clang::CallExpr>("callbo");
-			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo");
-			const Stmt *ST = Result.Nodes.getNodeAs<clang::ReturnStmt>("returnbo");
-			auto IfST = Result.Nodes.getNodeAs<IfStmt>("ifstmtbo");
-			auto WhileST = Result.Nodes.getNodeAs<WhileStmt>("whilebo");
 			llvm::errs()<<"fadd_be3 ...\n";
-			accumulateBinOp(BO, CE, VD, nullptr, ST, IfST, WhileST, Context);
+			SourceLocation StartLoc = getParentLoc(Result, BO);
+			BinLoc_Temp.insert(std::pair<const BinaryOperator*, SourceLocation>(BO, StartLoc));	
+			SmallVector<const BinaryOperator*, 8>::iterator it;
+			it = std::find(ProcessedBO.begin(), ProcessedBO.end(), BO);		
+			if(it != ProcessedBO.end())
+				return;
+			
+			ProcessedBO.push_back(BO);
+			BOStack.push(BO);
 		}
   }
 
@@ -1749,24 +1995,50 @@ public:
 	//check if there are open braces around statement, if not insert them
 	//rewritten using clang-tidy BracesAroundStatementsCheck
 	Matcher.addMatcher(ifStmt().bind("if"), &HandlerFloatVarDecl);
-	Matcher.addMatcher(ifStmt(hasAncestor(ifStmt(unless(hasAncestor(ifStmt()))).bind("topif"))).bind("curif"), &HandlerFloatVarDecl);
+	Matcher.addMatcher(ifStmt(unless(hasAncestor(ifStmt()))).bind("curif"), &HandlerFloatVarDecl);
 
 // match ifStmt(hasCondition(forEach(binaryOperator().bind("cond"))))
 //ifStmt(forEachDescendant(binaryOperator(hasOperatorName(">"))))
-	const auto cond = forEachDescendant(                                                                                                                             
-      binaryOperator(anyOf(hasOperatorName(">"), hasOperatorName(">="), 
+	const auto condBO = binaryOperator(anyOf(hasOperatorName(">"), hasOperatorName(">="), 
         hasOperatorName("=="), hasOperatorName("!="), hasOperatorName("<="),
-          hasOperatorName("<"))).bind("cond"));
+          hasOperatorName("<")));
+	const auto cond = forEachDescendant(
+          condBO.bind("cond"));
 
-	Matcher4.addMatcher(ifStmt(cond).
-					bind("ifcond"), &HandlerFloatVarDecl);
+	const auto ancestor  = anyOf(hasAncestor(varDecl().bind("vardeclbo")), 
+														hasAncestor(callExpr(unless(hasAncestor(binaryOperator(hasOperatorName("=")))),
+																unless(hasAncestor(returnStmt()))).bind("callbo")),
+																hasAncestor(returnStmt().bind("returnbo")),
+																		hasAncestor(binaryOperator(hasOperatorName("=")).bind("bobo")),
+																				hasAncestor(binaryOperator(hasOperatorName("/=")).bind("cbobo")),
+																						hasAncestor(binaryOperator(hasOperatorName("*=")).bind("cbobo")),
+																								hasAncestor(binaryOperator(hasOperatorName("-=")).bind("cbobo")),
+																									hasAncestor(binaryOperator(hasOperatorName("+=")).bind("cbobo")));
+//	Matcher4.addMatcher(ifStmt(hasCondition(binaryOperator().bind("cond"))).
+//					bind("ifcond"), &HandlerFloatVarDecl);
 
-	Matcher4.addMatcher(conditionalOperator(cond).
-					bind("ifcond"), &HandlerFloatVarDecl);
+	Matcher4.addMatcher( binaryOperator(anyOf(hasOperatorName(">"), hasOperatorName(">="), 
+        hasOperatorName("=="), hasOperatorName("!="), hasOperatorName("<="),
+          hasOperatorName("<")), 
+						anyOf(hasAncestor(ifStmt().bind("ifstmt")),
+							hasAncestor(returnStmt().bind("rtstmt")),
+							hasAncestor(varDecl().bind("vardecl")),
+							hasAncestor(binaryOperator(hasOperatorName("=")).bind("bineq"))),
+							unless(hasAncestor(conditionalOperator()))
+								).bind("ifcond"), &HandlerFloatVarDecl);
+
+	Matcher4.addMatcher(conditionalOperator(cond, ancestor, 
+				unless(hasAncestor(binaryOperator(hasOperatorName("+")))),
+					unless(hasAncestor(binaryOperator(hasOperatorName("*")))),
+						unless(hasAncestor(binaryOperator(hasOperatorName("/")))),
+							unless(hasAncestor(binaryOperator(hasOperatorName("-"))))).
+								bind("c_cond"), &HandlerFloatVarDecl);
 
 	Matcher4.addMatcher(whileStmt(cond).
-					bind("ifcond"), &HandlerFloatVarDecl);
+					bind("whilecond"), &HandlerFloatVarDecl);
 
+	Matcher4.addMatcher(doStmt(cond).
+					bind("docond"), &HandlerFloatVarDecl);
   Matcher.addMatcher(whileStmt().bind("while"), &HandlerFloatVarDecl);
   Matcher.addMatcher(doStmt().bind("do"), &HandlerFloatVarDecl);
   Matcher.addMatcher(forStmt().bind("for"), &HandlerFloatVarDecl);
@@ -1890,7 +2162,7 @@ public:
 
 		//sqrt => p32_sqrt
 		Matcher.addMatcher(
-			callExpr(callee(functionDecl(anyOf(hasName("sqrt"), hasName("cos"), 
+			callExpr(callee(functionDecl(anyOf(hasName("sqrt"), hasName("cos"), hasName("acos"), 
 				hasName("sin"), hasName("tan"), hasName("strtod"))))).
 					bind("callsqrt"), &HandlerFloatVarDecl);
 
@@ -1924,25 +2196,16 @@ public:
 		//mass = z = sum = 2.3
 		Matcher.addMatcher(
       binaryOperator(hasOperatorName("="), hasType(realFloatingPointType()), 
-				hasRHS(floatLiteral().bind("binfloat"))).
+				hasRHS(anyOf(floatLiteral().bind("binfloat"), ignoringParenImpCasts(integerLiteral().bind("binint"))))).
           bind("boassign"), &HandlerFloatVarDecl);
 	
 		const auto BinOp1 = binaryOperator(hasType(realFloatingPointType()),
-                                        hasEitherOperand(anyOf(ignoringParens(Basic), Op1)), 
-																						unless(hasOperatorName("=")),
-																							anyOf(hasAncestor(varDecl().bind("vardeclbo")), 
-																									hasAncestor(callExpr(unless(hasAncestor(binaryOperator(hasOperatorName("="))))).bind("callbo")),
-																										hasAncestor(returnStmt().bind("returnbo")),
-																												hasAncestor(binaryOperator(hasOperatorName("=")).bind("bobo")),
-																													hasAncestor(binaryOperator(hasOperatorName("/=")).bind("bobo")),
-																														hasAncestor(binaryOperator(hasOperatorName("*=")).bind("bobo")),
-																															hasAncestor(binaryOperator(hasOperatorName("-=")).bind("bobo")),
-																																hasAncestor(binaryOperator(hasOperatorName("+=")).bind("bobo")))).bind("fadd_be2");
+																						unless(hasOperatorName("=")), ancestor
+																																	).bind("fadd_be2");
 	
 		Matcher1.addMatcher(BinOp1, &HandlerFloatVarDecl);
 	
 		const auto BinOp4 = binaryOperator(hasType(realFloatingPointType()),
-                                        hasEitherOperand(anyOf(ignoringParens(Basic), Op1)), 
 																						unless(hasOperatorName("=")),
 																						unless(hasOperatorName("*=")),
 																						unless(hasOperatorName("/=")),
@@ -1966,14 +2229,20 @@ public:
 		//y = x++ + z;
 		//y = ++x;
 		const auto BinOp2 = binaryOperator(hasType(realFloatingPointType()), hasOperatorName("="),
-                                        hasEitherOperand(ignoringParenImpCasts(unaryOperator())
+                                        hasEitherOperand(ignoringParenImpCasts(
+																					unaryOperator(unless(hasOperatorName("*"))))
 																										)).bind("fadd_unary");
 	
 		Matcher1.addMatcher(BinOp2, &HandlerFloatVarDecl);
+		const auto Unary = unaryOperator(hasType(realFloatingPointType()), 
+													hasOperatorName("-"),
+													ancestor).bind("unaryOp");
+	
+		Matcher1.addMatcher(Unary, &HandlerFloatVarDecl);
 		//x /= y;
 		const auto BinOp3 = binaryOperator(hasType(realFloatingPointType()), anyOf(hasOperatorName("/="), 
-																hasOperatorName("+="), hasOperatorName("-="), hasOperatorName("*=")),
-                                        hasEitherOperand(anyOf(ignoringParens(Basic), Op1))).bind("fadd_comp");
+																hasOperatorName("+="), hasOperatorName("-="), hasOperatorName("*="))
+                                        ).bind("fadd_comp");
 	
 		Matcher1.addMatcher(BinOp3, &HandlerFloatVarDecl);
 	
