@@ -43,13 +43,23 @@ static llvm::cl::OptionCategory MyToolCategory("My tool options");
 static llvm::cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static llvm::cl::extrahelp MoreHelp("\nMore help text...");
 static llvm::cl::opt<string> YourOwnOption("abc", llvm::cl::cat(MyToolCategory));
+#define P16 true
 #define DoubleSize 6
+#ifdef P32
 std::string PositMathFunc = "p32_";
 std::string PositTY = "posit32_t ";
 std::string PositDtoP = "convertDoubleToP32 ";
 std::string PositPtoD = "convertP32ToDouble ";
 std::string PositPtoI32 = "p32_to_i32 ";
 std::string PositPtoI64 = "p32_to_i64 ";
+#elif P16
+std::string PositMathFunc = "p16_";
+std::string PositTY = "posit16_t ";
+std::string PositDtoP = "convertDoubleToP16 ";
+std::string PositPtoD = "convertP16ToDouble ";
+std::string PositPtoI32 = "p16_to_i32 ";
+std::string PositPtoI64 = "p16_to_i64 ";
+#endif
 std::string FloatingType = "double";
 std::stringstream SSBefore;
 //track temp variables
@@ -269,22 +279,22 @@ public:
 		string funcName;
 		switch(Opcode){
 			case BO_EQ:
-				funcName = "p32_eq";
+				funcName = PositMathFunc+"eq";
 				break;
 			case BO_NE:
-				funcName = "!p32_eq";
+				funcName = "!"+PositMathFunc+"eq";
 				break;
 			case BO_LE:
-				funcName = "p32_le";
+				funcName = PositMathFunc+"le";
 				break;
 			case BO_LT:
-				funcName = "p32_lt";
+				funcName = PositMathFunc+"lt";
 				break;
 			case BO_GE:
-				funcName = "!p32_lt";
+				funcName = "!"+PositMathFunc+"lt";
 				break;
 			case BO_GT:
-				funcName = "!p32_le";
+				funcName = "!"+PositMathFunc+"le";
 				break;
 			default:
 				assert("This opcode is not handled!!!");
@@ -297,24 +307,24 @@ public:
 		switch(Opcode){
 			case BO_Mul:
 			case BO_MulAssign:
-				funcName = "p32_mul";
+				funcName = PositMathFunc+"mul";
 				break;
 			case BO_Div:
 			case BO_DivAssign:
-				funcName = "p32_div";
+				funcName = PositMathFunc+"div";
 				break;
 			case UO_PostInc:
 			case BO_Add:
 			case BO_AddAssign:
-				funcName = "p32_add";
+				funcName = PositMathFunc+"add";
 				break;
 			case UO_PostDec:
 			case BO_Sub:
 			case BO_SubAssign:
-				funcName = "p32_sub";
+				funcName = PositMathFunc+"sub";
 				break;
 			case 21:
-				funcName = "p32_sub";
+				funcName = PositMathFunc+"sub";
 				break;
 			default:
 				assert("This opcode is not handled!!!");
@@ -664,7 +674,7 @@ std:: string handleCCast(SourceLocation StartLoc, const CStyleCastExpr *CS, std:
 		indirect += "*";
 	}
 	size_t pos = Arg.find(FloatingType);
-	Arg.replace(pos, FloatingType.size(), "posit32_t"); 
+	Arg.replace(pos, FloatingType.size(), PositTY); 
 
 	std::string temp;
 	temp = getTempDest();
@@ -916,7 +926,7 @@ SourceLocation getParentLoc(const MatchFinder::MatchResult &Result, const Binary
 				llvm::errs()<<"pos:"<<pos<<"\n";
 				std::string val = s.str();
 				if (pos != std::string::npos){
-					s.str().replace(pos, FloatingType.size(), "posit32_t"); 
+					s.str().replace(pos, FloatingType.size(), PositTY); 
 				}
       	s.flush();
 				
@@ -976,7 +986,7 @@ SourceLocation getParentLoc(const MatchFinder::MatchResult &Result, const Binary
 				llvm::errs()<<"pos:"<<pos<<"\n";
 				std::string val = s.str();
 				if (pos != std::string::npos){
-					s.str().replace(pos, FloatingType.size(), "posit32_t"); 
+					s.str().replace(pos, FloatingType.size(), PositTY); 
 				}
 				llvm::errs()<<"Op Not found, returning op as string:"<<Op1<<"\n\n\n";
       	s.flush();
@@ -1581,7 +1591,7 @@ if (InitialLoc.isInvalid())
         }
         const char *Buf1 = SM.getCharacterData(UE->getSourceRange().getBegin().getLocWithOffset(Offset));
 
-        Rewrite.ReplaceText(UE->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset-1, "posit32_t");
+        Rewrite.ReplaceText(UE->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset-1, PositTY);
       }
 		}
 		if (const FieldDecl *FD = Result.Nodes.getNodeAs<clang::FieldDecl>("struct")){
@@ -1681,7 +1691,7 @@ if (InitialLoc.isInvalid())
 				size_t pos = VarStr.find("double");
 				llvm::errs()<<"pos:"<<pos<<"\n";
 				if(pos == 0)
-        	Rewrite.ReplaceText(StartLoc, 6, "posit32_t");
+        	Rewrite.ReplaceText(StartLoc, 6, PositTY);
 				}
 		}
 		if(const FunctionDecl *FD = Result.Nodes.getNodeAs<clang::FunctionDecl>("addheader")){
