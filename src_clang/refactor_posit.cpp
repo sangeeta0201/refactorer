@@ -59,6 +59,13 @@ std::string PositDtoP = "convertDoubleToP16 ";
 std::string PositPtoD = "convertP16ToDouble ";
 std::string PositPtoI32 = "p16_to_i32 ";
 std::string PositPtoI64 = "p16_to_i64 ";
+#elif P8
+std::string PositMathFunc = "p8_";
+std::string PositTY = "posit8_t ";
+std::string PositDtoP = "convertDoubleToP8 ";
+std::string PositPtoD = "convertP8ToDouble ";
+std::string PositPtoI32 = "p8_to_i32 ";
+std::string PositPtoI64 = "p8_to_i64 ";
 #endif
 std::string FloatingType = "double";
 std::stringstream SSBefore;
@@ -674,8 +681,9 @@ std:: string handleCCast(SourceLocation StartLoc, const CStyleCastExpr *CS, std:
 		indirect += "*";
 	}
 	size_t pos = Arg.find(FloatingType);
-	Arg.replace(pos, FloatingType.size(), PositTY); 
-
+	if (pos != std::string::npos){
+		Arg.replace(pos, FloatingType.size(), PositTY); 
+	}
 	std::string temp;
 	temp = getTempDest();
 	Rewrite.InsertText(StartLoc,
@@ -1448,7 +1456,7 @@ if (InitialLoc.isInvalid())
 			llvm::errs()<<"finit\n";
 		}
 		if (const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("initfloatliteral_vd")){
-			llvm::errs()<<"initfloatliteral\n";
+			llvm::errs()<<"initfloatliteral_vd\n";
 			const InitListExpr *ILE = Result.Nodes.getNodeAs<clang::InitListExpr>("init");
 			const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("init_literal");
 			const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
@@ -1537,8 +1545,31 @@ if (InitialLoc.isInvalid())
 			const char *Buf1 = SM.getCharacterData(FL->getSourceRange().getBegin().getLocWithOffset(Offset));
 			Rewrite.ReplaceText(FL->getSourceRange().getBegin(), Offset, temp);
 
-			const char *BufVD = SM.getCharacterData(VD->getSourceRange().getBegin());
+			TypeLoc VarTypeLoc = VD->getTypeSourceInfo()->getTypeLoc();
+
+			TypeLoc NextTL = VarTypeLoc.getNextTypeLoc();
+			while (!NextTL.isNull()) {
+				VarTypeLoc = NextTL;
+				NextTL = NextTL.getNextTypeLoc();
+			}
+
+			SourceLocation VDLoc = VD->getSourceRange().getBegin();
+
+			const char *BufVD1 = SM.getCharacterData(VDLoc);
 			int VDOffset = 0;
+			while (*BufVD1 != ';') {
+				if(*BufVD1 == ' ')
+					break;
+				if(*BufVD1 == '*')	
+					break;
+				BufVD1++;
+				VDOffset++;
+			}
+	
+		
+			SourceLocation VarTypeL = VarTypeLoc.getBeginLoc();
+			if(VarTypeL != VDLoc){
+			const char *BufVD = SM.getCharacterData(VarTypeL);
 			while (*BufVD != ';') {
 				if(*BufVD == ' ')
 					break;
@@ -1547,10 +1578,11 @@ if (InitialLoc.isInvalid())
 				BufVD++;
 				VDOffset++;
 			}
+			}
 			SmallVector<const VarDecl*, 8>::iterator itvd;
 			itvd = std::find(ProcessedVD.begin(), ProcessedVD.end(), VD);		
 			if(itvd == ProcessedVD.end()){
-				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), VDOffset, "       ");
+				Rewrite.ReplaceText(VD->getSourceRange().getBegin(), VDOffset+1, "       ");
 				ProcessedVD.push_back(VD);
 			}
 			if(ite == ProcessedILE.end()){
@@ -1613,6 +1645,7 @@ if (InitialLoc.isInvalid())
 		}
 		if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
 			llvm::errs()<<"vardeclnoinit\n";
+			VD->dump();
 			const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
   		if (PD) {
 				ReplaceParmVDWithPosit(VD->getSourceRange().getBegin(), ' ');
