@@ -97,6 +97,7 @@ SmallVector<const IntegerLiteral*, 8> ProcessedIL;
 SmallVector<const VarDecl*, 8> ProcessedVD;
 SmallVector<const CallExpr*, 8> ProcessedCE;
 SmallVector<const CStyleCastExpr*, 8> ProcessedCCast;
+SmallVector<const IfStmt*, 8> ProcessedStmt;
 std::map<const Expr*, std::string> ProcessedExpr; 
 
 static llvm::cl::OptionCategory MatcherSampleCategory("Matcher Sample");
@@ -1404,7 +1405,10 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
           if(BinIfLoc.count(S) != 0){
             IfStartLoc = BinIfLoc.at(S);
           }
+          auto Cond = Result.Nodes.getNodeAs<Expr>("ifstmtcond");
           handleCondition(IfStartLoc, BinOp);
+
+          ProcessedExpr.insert(std::pair<const Expr*, std::string>(Cond, ""));	
         }
       }
       if (auto S = Result.Nodes.getNodeAs<IfStmt>("curif")) {
@@ -1875,6 +1879,7 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
       }
       if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclpointer")){
         llvm::errs()<<"vardeclpointer\n";
+        VD->dump();
         if(!isPointerToFloatingType(VD->getType().getTypePtr()))
           return;
         SourceLocation StartLoc = VD->getSourceRange().getBegin();
@@ -1898,11 +1903,9 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
           llvm::errs()<<"param var:\n";
         const char *StartBuf = SM.getCharacterData(StartLoc);
         std::string VarStr(StartBuf);
-        //size_t pos = VarStr.find(FloatingType);
-        //llvm::errs()<<"pos:"<<pos<<"\n";
-        //if(pos == 0)
-        //ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), indirect+VD->getNameAsString()+";");
-        Rewrite.ReplaceText(StartLoc, FloatingType.size(), PositTY);
+        ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), indirect+VD->getNameAsString()+";");
+        //Don't just replace it otherwise it won't work for double *x, *y, *z
+       // Rewrite.ReplaceText(StartLoc, FloatingType.size(), PositTY);
       }
       if(const FunctionDecl *FD = Result.Nodes.getNodeAs<clang::FunctionDecl>("addheader")){
         llvm::errs()<<"addheader\n";
@@ -1911,20 +1914,39 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
 
       }
       if(const CStyleCastExpr *CS = Result.Nodes.getNodeAs<clang::CStyleCastExpr>("ccast")){
-        llvm::errs()<<"*****ccast..\n";
-
+        llvm::errs()<<"*****ccast..\n\n";
         SmallVector<const CStyleCastExpr*, 8>::iterator it;
         it = std::find(ProcessedCCast.begin(), ProcessedCCast.end(), CS);		
-        if(it != ProcessedCCast.end())
-          return;
+        if(it != ProcessedCCast.end()){
+          llvm::errs()<<"*****ccast processed before..\n";
 
+          return;
+        }
+
+        llvm::errs()<<"*****ccast..1\n";
         ProcessedCCast.push_back(CS);
+
+        //check if it is inside if stmt and if ifstmt is processed
+        SmallVector<const IfStmt*, 8>::iterator ifit;
+        auto IfST = Result.Nodes.getNodeAs<IfStmt>("ifstmt");
+        auto Cond = Result.Nodes.getNodeAs<Expr>("ifstmtcond");
+        if(Cond){
+        llvm::errs()<<"*****ccast..2\n";
+          if(ProcessedExpr.count(Cond) != 0){
+//            llvm::errs()<<"handleOperand is processed before....\n";
+ //           return;
+          }
+        llvm::errs()<<"*****ccast..3\n";
+          ProcessedExpr.insert(std::pair<const Expr*, std::string>(Cond, ""));	
+        }
+        llvm::errs()<<"*****ccast..4\n";
         QualType QT = CS->getTypeAsWritten();
         QT->dump();
         std::string TypeStr = QT.getAsString();
         if(TypeStr.find(FloatingType) == 0 || TypeStr.find(FloatingTypeF) == 0){
           const char *Buf = SM.getCharacterData(CS->getSourceRange().getBegin());
           int StartOffset = 0;
+        llvm::errs()<<"*****ccast..5\n";
           while (*Buf != '(') {
             Buf++;
             StartOffset++;
@@ -1943,6 +1965,7 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
           }
           const char *Buf1 = SM.getCharacterData(CS->getSourceRange().getBegin().getLocWithOffset(Offset));
 
+        llvm::errs()<<"*****ccast..7\n";
           Rewrite.ReplaceText(CS->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset, PositTY);
         }
         else{
@@ -2320,7 +2343,7 @@ class MyASTConsumer : public ASTConsumer {
       Matcher4.addMatcher( binaryOperator(anyOf(hasOperatorName(">"), hasOperatorName(">="), 
               hasOperatorName("=="), hasOperatorName("!="), hasOperatorName("<="),
               hasOperatorName("<")), 
-            anyOf(hasAncestor(ifStmt().bind("ifstmt")),
+            anyOf(hasAncestor(ifStmt(hasCondition(expr().bind("ifstmtcond"))).bind("ifstmt")),
               hasAncestor(returnStmt().bind("rtstmt")),
               hasAncestor(varDecl().bind("vardecl")),
               hasAncestor(forStmt().bind("forstmt")),
@@ -2580,13 +2603,38 @@ class MyASTConsumer : public ASTConsumer {
       Matcher2.addMatcher(
           callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfsqrt")
           , &HandlerFloatVarDecl);
-     
-     //handle ccast for everything except for function calls as it is handled in callexpr 
-      Matcher4.addMatcher(cStyleCastExpr(
-            unless(hasAncestor(callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfarg")))
-            ).bind("ccast") , &HandlerFloatVarDecl);
 
-            
+      Matcher4.addMatcher(
+          binaryOperator(hasOperatorName("="), 
+            hasDescendant(cStyleCastExpr(unless(hasAncestor(binaryOperator(anyOf(hasOperatorName("*"),
+                          hasOperatorName("/"),
+                          hasOperatorName("-"),
+                          hasOperatorName("+")))))).bind("ccast")
+              )), &HandlerFloatVarDecl);     
+      Matcher4.addMatcher(binaryOperator(hasOperatorName("="), hasLHS(hasDescendant(cStyleCastExpr(unless(hasAncestor(binaryOperator(anyOf(hasOperatorName("*"),
+                          hasOperatorName("/"),
+                          hasOperatorName("-"),
+                          hasOperatorName("+")))))).bind("ccast")))), &HandlerFloatVarDecl);     
+      Matcher4.addMatcher(binaryOperator(hasOperatorName("="), hasRHS(hasDescendant(cStyleCastExpr(unless(hasAncestor(binaryOperator(anyOf(hasOperatorName("*"),
+                          hasOperatorName("/"),
+                          hasOperatorName("-"),
+                          hasOperatorName("+")))))).bind("ccast")))), &HandlerFloatVarDecl);     
+     //handle ccast for everything except for function calls as it is handled in callexpr 
+    /* 
+      Matcher4.addMatcher(cStyleCastExpr(
+            unless(hasAncestor(callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfarg"))),
+            unless(hasParent(ifStmt(hasConditionVariableStatement(anything())).bind("ifstmtbo")))
+            ).bind("ccast") , &HandlerFloatVarDecl);
+*/
+     /* 
+      Matcher4.addMatcher(forStmt(hasElse(stmt())), &HandlerFloatVarDecl);
+      */
+          /*
+      Matcher4.addMatcher(cStyleCastExpr(
+            unless(hasAncestor(callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfarg"))),
+            hasAncestor(ifStmt(hasCondition(expr().bind("ifstmtcond"))))
+            ).bind("ccast") , &HandlerFloatVarDecl);
+            */
       //double t = 0.5 + x + z * y ;   
       /*
          Matcher4.addMatcher(
