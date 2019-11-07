@@ -96,7 +96,7 @@ SmallVector<const InitListExpr*, 8> ProcessedILE;
 SmallVector<const IntegerLiteral*, 8> ProcessedIL;
 SmallVector<const VarDecl*, 8> ProcessedVD;
 SmallVector<const CallExpr*, 8> ProcessedCE;
-//SmallVector<const Expr*, 8> ProcessedExpr;
+SmallVector<const CStyleCastExpr*, 8> ProcessedCCast;
 std::map<const Expr*, std::string> ProcessedExpr; 
 
 static llvm::cl::OptionCategory MatcherSampleCategory("Matcher Sample");
@@ -1083,8 +1083,11 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         }
       }
       else if(const CStyleCastExpr *CCE = dyn_cast<CStyleCastExpr>(Op)){
-
         llvm::errs()<<"Op is cast\n";
+        SmallVector<const CStyleCastExpr*, 8>::iterator it;
+
+        ProcessedCCast.push_back(CCE);
+
         std::string subExpr;
         CCE->getSubExpr();
         llvm::raw_string_ostream stream(subExpr);
@@ -1409,23 +1412,6 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         llvm::errs()<<"****\n";
         //BinIfLoc.insert(std::pair<const IfStmt*, SourceLocation>(S, S->getSourceRange().getBegin()));	
       }
-      if (const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("boassignvd")){
-        llvm::errs()<<"boassignvd\n";
-        std::string opName;
-        llvm::raw_string_ostream stream(opName);
-        BO->printPretty(stream, NULL, PrintingPolicy(LangOptions()));
-        llvm::errs()<<opName<<"\n";
-        const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("floatliteral");
-        const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
-        if(FL){
-          std::string positLiteral = convertFloatToPosit(FL);
-          Rewrite.ReplaceText(SourceRange(FL->getSourceRange().getBegin(), FL->getSourceRange().getEnd()), positLiteral);
-        }
-        if(IL){
-          std::string positLiteral = convertIntToPosit(IL);
-          Rewrite.ReplaceText(SourceRange(IL->getSourceRange().getBegin(), IL->getSourceRange().getEnd()), positLiteral);
-        }
-      }
       if (const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("initintegerliteral")){
         llvm::errs()<<"initintegerliteral\n";
         const InitListExpr *ILE = Result.Nodes.getNodeAs<clang::InitListExpr>("init");
@@ -1732,8 +1718,8 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
           removeLineVD(VD->getSourceRange().getBegin());
         }
       }
-      if (const UnaryExprOrTypeTraitExpr *UE = Result.Nodes.getNodeAs<clang::UnaryExprOrTypeTraitExpr>("unary")){
-        llvm::errs()<<"unary...\n";
+      if (const UnaryExprOrTypeTraitExpr *UE = Result.Nodes.getNodeAs<clang::UnaryExprOrTypeTraitExpr>("unarysizeof")){
+        llvm::errs()<<"unarysizeof...\n";
         QualType QT = UE->getTypeOfArgument();
         std::string TypeStr = QT.getAsString();
         SourceManager &SM = Rewrite.getSourceMgr();
@@ -1741,7 +1727,7 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         if (StartLoc.isMacroID()) {
           StartLoc = SM.getFileLoc(StartLoc);
         }
-        if(TypeStr.find(FloatingTypeD) == 0){
+        if(TypeStr.find(FloatingType) == 0 || TypeStr.find(FloatingTypeF) == 0){
           const char *Buf = SM.getCharacterData(UE->getSourceRange().getBegin());
           int StartOffset = 0;
           while (*Buf != '(') {
@@ -1756,11 +1742,13 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
               break; 
             if(*Buf == '*')
               break; 
+            if(*Buf == ')')
+              break; 
             Offset++;
           }
           const char *Buf1 = SM.getCharacterData(UE->getSourceRange().getBegin().getLocWithOffset(Offset));
 
-          Rewrite.ReplaceText(UE->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset-1, PositTY);
+          Rewrite.ReplaceText(UE->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset, PositTY);
         }
       }
       if (const FieldDecl *FD = Result.Nodes.getNodeAs<clang::FieldDecl>("struct")){
@@ -1773,6 +1761,9 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intliteral");
         const ArraySubscriptExpr *ASE = Result.Nodes.getNodeAs<clang::ArraySubscriptExpr>("arrayliteral");
         const DeclRefExpr *DE = Result.Nodes.getNodeAs<clang::DeclRefExpr>("declexpr");
+        const UnaryOperator *U_lhs = Result.Nodes.getNodeAs<clang::UnaryOperator>("unaryOp");
+        const BinaryOperator *BO = Result.Nodes.getNodeAs<clang::BinaryOperator>("binop");
+
         if(FL != NULL){
           std::string positLiteral = VD->getNameAsString()+" = "+convertFloatToPosit(FL);
           ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
@@ -1789,15 +1780,41 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
           ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
         }
         else if(DE != NULL){
+          llvm::errs()<<"vd_literal decl\n";
+          const Type *Ty = DE->getType().getTypePtr();
+          if(Ty->isFloatingType()){
+            std::string TypeS;
+            llvm::raw_string_ostream s(TypeS);
+            DE->printPretty(s, 0, PrintingPolicy(LangOptions()));
+            std::string positLiteral = VD->getNameAsString()+" = "+s.str()+";";
+            ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
+          }
+          else{ //integral type
+            std::string TypeS;
+            llvm::raw_string_ostream s(TypeS);
+            DE->printPretty(s, 0, PrintingPolicy(LangOptions()));
+            std::string positLiteral = VD->getNameAsString()+" = "+PositDtoP+"("+s.str()+");";
+            ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
+          }
+        }
+        else if(U_lhs != NULL){
           std::string TypeS;
           llvm::raw_string_ostream s(TypeS);
-          DE->printPretty(s, 0, PrintingPolicy(LangOptions()));
-          std::string positLiteral = VD->getNameAsString()+" = "+s.str()+";";
+          U_lhs->printPretty(s, 0, PrintingPolicy(LangOptions()));
+          std::string positLiteral = VD->getNameAsString()+" = "+PositDtoP+"("+s.str()+");";
+          ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
+        }
+        else if(BO != NULL){
+          std::string TypeS;
+          llvm::raw_string_ostream s(TypeS);
+          BO->printPretty(s, 0, PrintingPolicy(LangOptions()));
+          std::string positLiteral = VD->getNameAsString()+" = "+PositDtoP+"("+s.str()+");";
           ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), positLiteral);
         }
       }
       if (const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclnoinit")){
         llvm::errs()<<"vardeclnoinit\n";
+        VD->dump();
         const ParmVarDecl *PD = dyn_cast<ParmVarDecl>(VD);
         if (PD) {
           ReplaceParmVDWithPosit(VD->getSourceRange().getBegin(), ' ');
@@ -1895,11 +1912,41 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
       }
       if(const CStyleCastExpr *CS = Result.Nodes.getNodeAs<clang::CStyleCastExpr>("ccast")){
         llvm::errs()<<"*****ccast..\n";
-        const VarDecl *VD = Result.Nodes.getNodeAs<clang::VarDecl>("vardeclbo");
-        if(VD){
-          std::string tmp = handleOperand(VD->getSourceRange().getBegin(), CS);
-          llvm::errs()<<"tmp:"<<tmp<<"\n";
-          ReplaceVDWithPosit(VD->getSourceRange().getBegin(), VD->getSourceRange().getEnd(), VD->getNameAsString()+" = "+tmp+";");
+
+        SmallVector<const CStyleCastExpr*, 8>::iterator it;
+        it = std::find(ProcessedCCast.begin(), ProcessedCCast.end(), CS);		
+        if(it != ProcessedCCast.end())
+          return;
+
+        ProcessedCCast.push_back(CS);
+        QualType QT = CS->getTypeAsWritten();
+        QT->dump();
+        std::string TypeStr = QT.getAsString();
+        if(TypeStr.find(FloatingType) == 0 || TypeStr.find(FloatingTypeF) == 0){
+          const char *Buf = SM.getCharacterData(CS->getSourceRange().getBegin());
+          int StartOffset = 0;
+          while (*Buf != '(') {
+            Buf++;
+            StartOffset++;
+          }
+          StartOffset++;
+          int Offset = 0;
+          while (*Buf != ')') {
+            Buf++;
+            if(*Buf == ' ')
+              break; 
+            if(*Buf == '*')
+              break; 
+            if(*Buf == ')')
+              break; 
+            Offset++;
+          }
+          const char *Buf1 = SM.getCharacterData(CS->getSourceRange().getBegin().getLocWithOffset(Offset));
+
+          Rewrite.ReplaceText(CS->getSourceRange().getBegin().getLocWithOffset(StartOffset), Offset, PositTY);
+        }
+        else{
+          llvm::errs()<<"ccast parent not found..\n";
         }
 #if 0
         CS->dump();
@@ -2051,6 +2098,7 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         llvm::errs()<<"boassign\n";
         const FloatingLiteral *FL = Result.Nodes.getNodeAs<clang::FloatingLiteral>("binfloat");
         const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("binint");
+        const BinaryOperator *BinOp = Result.Nodes.getNodeAs<clang::BinaryOperator>("binop");
         if(FL != NULL){
           std::string positLiteral = convertFloatToPosit(FL);
           Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), 
@@ -2058,6 +2106,14 @@ class FloatVarDeclHandler : public MatchFinder::MatchCallback {
         }
         if(IL != NULL){
           std::string positLiteral = convertIntToPosit(IL);
+          Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), 
+                BO->getRHS()->getSourceRange().getEnd()), positLiteral);
+        }
+        if(BinOp != NULL){
+          std::string TypeS;
+          llvm::raw_string_ostream s(TypeS);
+          BinOp->printPretty(s, 0, PrintingPolicy(LangOptions()));
+          std::string positLiteral = PositDtoP+"("+s.str()+");";
           Rewrite.ReplaceText(SourceRange(BO->getRHS()->getSourceRange().getBegin(), 
                 BO->getRHS()->getSourceRange().getEnd()), positLiteral);
         }
@@ -2293,15 +2349,18 @@ class MyASTConsumer : public ASTConsumer {
       //double sum = z;
       Matcher.addMatcher(
           varDecl(hasType(realFloatingPointType()), 
-            unless(hasDescendant(binaryOperator(hasOperatorName("*")))), 
+//            unless(hasDescendant(binaryOperator(hasOperatorName("*")))), 
             anyOf(hasInitializer(ignoringParenImpCasts(
                   integerLiteral().bind("intliteral"))), 
+              hasInitializer(ignoringParenImpCasts(unaryOperator(has(ignoringParenImpCasts(integerLiteral()))).bind("unaryOp"))),
               hasInitializer(ignoringParenImpCasts(
                   floatLiteral().bind("floatliteral"))), 
               hasInitializer(ignoringParenImpCasts(
                     arraySubscriptExpr().bind("arrayliteral"))), 
               hasInitializer(ignoringParenImpCasts(
                       declRefExpr().bind("declexpr"))), 
+              hasInitializer(ignoringParenImpCasts(
+                      binaryOperator(hasType(isInteger())).bind("binop"))), 
               hasDescendant(binaryOperator(hasOperatorName("="))))).bind("vd_literal"), &HandlerFloatVarDecl);
       /*
       //double x[2] = {2.3, 3.4}
@@ -2377,6 +2436,7 @@ class MyASTConsumer : public ASTConsumer {
             unless( hasInitializer(ignoringParenImpCasts(arraySubscriptExpr()))), 
             unless(hasDescendant(callExpr())),
             unless(hasDescendant(declRefExpr())),
+            unless(hasDescendant(unaryOperator(has(ignoringParenImpCasts(integerLiteral()))))),
             unless(hasDescendant(unaryOperator(has(ignoringParenImpCasts(floatLiteral()))))),
             unless(hasDescendant(binaryOperator()))).
           bind("vardeclnoinit"), &HandlerFloatVarDecl);
@@ -2411,7 +2471,7 @@ class MyASTConsumer : public ASTConsumer {
       //sizeof(double)
       Matcher.addMatcher(
           unaryExprOrTypeTraitExpr(ofKind(UETT_SizeOf)).
-          bind("unary"), &HandlerFloatVarDecl);
+          bind("unarysizeof"), &HandlerFloatVarDecl);
 
       //add softposit.h
       Matcher.addMatcher(
@@ -2460,7 +2520,11 @@ class MyASTConsumer : public ASTConsumer {
       //mass = z = sum = 2.3
       Matcher.addMatcher(
           binaryOperator(hasOperatorName("="), hasType(realFloatingPointType()), 
-            hasRHS(anyOf(ignoringParenImpCasts(floatLiteral().bind("binfloat")), ignoringParenImpCasts(integerLiteral().bind("binint"))))).
+            hasRHS(anyOf(
+                  ignoringParenImpCasts(floatLiteral().bind("binfloat")), 
+                  ignoringParenImpCasts(integerLiteral().bind("binint")),
+                  ignoringParenImpCasts(binaryOperator(hasType(isInteger())).bind("binop"))
+                  ))).
           bind("boassign"), &HandlerFloatVarDecl);
 
       const auto BinOp1 = binaryOperator(hasType(realFloatingPointType()),
@@ -2516,12 +2580,12 @@ class MyASTConsumer : public ASTConsumer {
       Matcher2.addMatcher(
           callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfsqrt")
           , &HandlerFloatVarDecl);
-      
+     
+     //handle ccast for everything except for function calls as it is handled in callexpr 
       Matcher4.addMatcher(cStyleCastExpr(
-            unless(hasAncestor(binaryOperator(unless(hasOperatorName("="))))),
-            anyOf(hasAncestor(varDecl().bind("vardeclbo")), hasAncestor(binaryOperator().bind("bobo")), 
-              hasAncestor(callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfarg")))
+            unless(hasAncestor(callExpr(callee(functionDecl(anyOf(hasName("printf"), hasName("fprintf"))))).bind("printfarg")))
             ).bind("ccast") , &HandlerFloatVarDecl);
+
             
       //double t = 0.5 + x + z * y ;   
       /*
