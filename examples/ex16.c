@@ -1,5 +1,4 @@
-
-  double xx;
+double xx;
 double B[3][3], C[3][3];
 struct foos{
   double x;
@@ -21,17 +20,17 @@ void testMat(double **A, double B[][3]){
     }
   }
 }
-
 int main() {
   double x,y;
-  struct foos f;
-
+	struct foos f;
   double **A = (double **)malloc(3*sizeof(double *));
   for(int i =0; i< 3; i++)
     A[i] = (double *)malloc(3*sizeof(double)); 
+
   x = 1.1;
   y = sqrt(x);
   f = foo(&x, &y);
+  printf("%e\n", f.x);
   printf("%e\n", f.x);
   printf("%e\n", f.y);
   printf("%e\n", f.sum);

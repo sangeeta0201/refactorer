@@ -4,5 +4,5 @@ int foo(){
 	double z;
 	double sum;
 	z = x + y+ 3.1; 
-//	sum = sqrt(z);
+	sum = sqrt(z);
 }
