@@ -1,93 +1,68 @@
-
-posit32_t  arr[2] ;
-__attribute__ ((constructor)) void __init_arr(void){
-posit32_t tmp1 = convertDoubleToP32 (1.1999999999999999555910790149937E+0);
-rapl_p32_force_store(&arr[0],tmp1);
-posit32_t tmp2 = convertDoubleToP32 (3.3999999999999999111821580299875E+0);
-rapl_p32_force_store(&arr[1],tmp2);
-
+/*void bar(float *x){
 }
-
-posit32_t u1[10];
-
-posit32_t u2[10];
-
-posit32_t v1[10];
-
-posit32_t v2[10];
-
-posit32_t x[10];
-
-posit32_t y[10];
-
-posit32_t z[10];
-
-posit32_t w[10];
-
-posit32_t A[10][10];
-
-
-int ni=10;
-int nj=10;
-int nk=10;
-int j = 10;
-int n = 10;
-posit32_t  bar(posit32_t tmp3, posit32_t tmp5){
-  posit32_t tmp4 = rapl_p32_get_arg(tmp3);
-  posit32_t  x;
-  rapl_p32_force_store(&x,tmp4);
-
-  posit32_t tmp6 = rapl_p32_get_arg(tmp5);
-  posit32_t  y;
-  rapl_p32_force_store(&y,tmp6);
-
-  posit32_t tmp7 = rapl_p32_force_load(&x);
-  
-  posit32_t tmp8 = rapl_p32_force_load(&y);
-  
-  bool tmp9 = (tmp7,tmp8);
-  posit32_t tmp10 = convertDoubleToP32 (tmp9);
-  posit32_t tmp12 = rapl_p32_set_ret(tmp10);
-  return tmp12;
+void foo1(float *x){
+//  *x = sqrt(*x) ; //there should be error here and it should tace back to float xx
+  bar(x);
 }
-posit32_t  foo(posit32_t tmp13, posit32_t tmp15, posit32_t tmp17){
-  posit32_t tmp14 = rapl_p32_get_arg(tmp13);
-  posit32_t  zz;
-  rapl_p32_force_store(&zz,tmp14);
-
-  posit32_t tmp16 = rapl_p32_get_arg(tmp15);
-  posit32_t  kk;
-  rapl_p32_force_store(&kk,tmp16);
-
-  posit32_t tmp18 = rapl_p32_get_arg(tmp17);
-  posit32_t  tt;
-  rapl_p32_force_store(&tt,tmp18);
-
+*/
+/*
+void bar2(float *x){
+    *x = (*x) * (*x); //there should be error here and it should tace back to float xx
+      printf("%e\n", *x);  //(xx+x)*(xx+x)
+}
+float cordic_sin(float theta){
+}
+*/
+posit32_t  foo(int n){
+ // float z,di;
+  posit32_t R;posit32_t Q;posit32_t CR2;posit32_t CQ3;posit32_t a;posit32_t b;posit32_t sgnR;posit32_t R2;posit32_t Q3;
+//  double *x0, *x1;
   /*
-  double fn = (double)n;
-  for (int i = 0; i < n; i++)
-  {    
-    u1[i] = i;
-    u2[i] = ((i+1)/fn)/2.0;
-    u2[i] = ((i+1)/fn)/2.0;
-    v1[i] = ((i+1)/fn)/4.0;
-    v2[i] = ((i+1)/fn)/6.0;
-    y[i] = ((i+1)/fn)/8.0;
-    z[i] = ((i+1)/fn)/9.0;
-    x[i] = 0.0;
-    w[i] = 0.0;
-    for (j = 0; j < n; j++)
-      A[i][j] = (double) (i*j % n) / n;
-  } 
-  */
-  posit32_t tmp22 = rapl_p32_set_arg(kk,1);
-  posit32_t tmp23 = rapl_p32_set_arg(tt,2);
-  posit32_t tmp25 = bar(tmp22,tmp23);
-  posit32_t tmp26 = rapl_p32_get_ret(tmp25);
-  rapl_p32_force_store(&zz,tmp26);
+  if (R == 0 && Q == 0)
+  {
+    *x0 = - a / 3 ;
+  }
+  else if (CR2 == CQ3)
+  {
+    *x1 = - a / 3 ;
+  }*/
+  posit32_t tmp1 = rapl_p32_force_load(&(R2));
   
-  posit32_t tmp19 = rapl_p32_force_load(&zz);
+  posit32_t tmp2 = rapl_p32_force_load(&(Q3));
   
-  posit32_t tmp21 = rapl_p32_set_ret(tmp19);
-  return tmp21;
+  posit32_t tmp3 = p32_sub(tmp1,tmp2);
+  posit32_t tmp4 = convertDoubleToP32 (1.0E+0);
+  posit32_t tmp5 = convertDoubleToP32 (3.0E+0);
+  posit32_t tmp6 = p32_div(tmp4,tmp5);
+  posit32_t tmp7 = rapl_p32_force_load(&(R));
+  
+  posit32_t tmp8 = p32_fabs(tmp7);
+  posit32_t tmp10 = p32_sqrt(tmp3);
+  posit32_t tmp12 = p32_add(tmp8,tmp10);
+  posit32_t tmp13 = convertDoubleToP32 (0);
+  posit32_t tmp14 = rapl_p32_force_load(&(sgnR));
+  
+  posit32_t tmp15 = p32_sub(tmp13,tmp14);
+  posit32_t tmp16 = p32_pow(tmp12,tmp6);
+  posit32_t tmp18 = p32_mul(tmp15,tmp16);
+  posit32_t A;
+  rapl_p32_force_store(&(A),tmp18);
+  
+ // float theta, sin;
+//  theta = -sin;
+//  double sgnR = (R >= 0 ? 1 : -1);
+//  double q = (a * a - 3 * b);
+//   *x0 = - a / 3 ;
+//  for (float theta = sin; theta < 1.54; theta = theta + 0.00000065) {
+//    cos += theta;
+//  }
+ // if (fabsf(diffX) != 0.0) {
+//    cordic_sin(theta);
+//  }
+/*
+  if (z >= 0) di = 1.0;
+          else 
+            di = -1.0;
+*/
 }
+
