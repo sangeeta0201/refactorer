@@ -5,7 +5,7 @@
 #define SIZE_Y 10
 #define SIZE_X 10
 typedef double LBM_Grid[SIZE_Z*SIZE_Y*SIZE_X*N_CELL_ENTRIES];
-int foo( double** ptr, double xx ){
+void foo( double** ptr, double xx ){
 	int n = 10;
 	int m = 10;
 	int i = 2;
